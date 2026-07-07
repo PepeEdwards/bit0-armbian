@@ -1,0 +1,8 @@
+# Armbian build artifacts (inside the submodule, ignored there too — belt and suspenders)
+build/cache/
+build/output/
+
+# Local scratch
+*.img
+*.img.xz
+*.log
