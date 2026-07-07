@@ -1,0 +1,17 @@
+[Unit]
+Description=Bit0 graphical launcher (splash + menu on /dev/fb0)
+After=multi-user.target uart-hid-bridge.service touch-mouse.service
+# The launcher owns tty1/fb0; getty would fight it for input focus.
+Conflicts=getty@tty1.service
+
+[Service]
+ExecStart=/usr/local/bin/bit0-launcher
+Environment=HOME=/root
+WorkingDirectory=/root
+Restart=always
+RestartSec=1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

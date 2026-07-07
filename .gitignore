@@ -6,3 +6,4 @@ build/output/
 *.img
 *.img.xz
 *.log
+__pycache__/

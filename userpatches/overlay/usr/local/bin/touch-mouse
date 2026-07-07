@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""ADS7846 touchscreen -> uinput absolute pointer ("touch acts as mouse").
+
+Reads raw events from /dev/input/event0 (grabbed, so nothing else sees the
+uncalibrated data), applies the affine calibration from /etc/touch-mouse.cal
+(produced by touch-cal) and emits a clean absolute pointer device
+"Lyra Touch Mouse" with proper 0..W-1 / 0..H-1 ranges plus BTN_TOUCH.
+DirectFB/SDL then treat it as a touchscreen: cursor jumps to the touched
+point, press = left button.
+"""
+
+import os
+import sys
+import time
+import struct
+import fcntl
+
+EVDEV    = '/dev/input/event0'
+CAL_FILE = '/etc/touch-mouse.cal'
+UINPUT   = '/dev/uinput'
+
+EVIOCGRAB = 0x40044590
+
+# uinput ioctls (ARM 32-bit Linux)
+UI_SET_EVBIT  = 0x40045564
+UI_SET_KEYBIT = 0x40045565
+UI_SET_ABSBIT = 0x40045567
+UI_DEV_CREATE = 0x5501
+
+EV_SYN, EV_KEY, EV_ABS = 0x00, 0x01, 0x03
+SYN_REPORT = 0
+BUS_USB    = 0x03
+BTN_TOUCH  = 0x14a
+ABS_X, ABS_Y = 0x00, 0x01
+
+# px of movement (post-calibration) to register as motion while held;
+# below this, a held finger's sample jitter is ignored so a tap = a point.
+TOUCH_DEADZONE = 4
+
+# seconds to hold the cursor at the touch point (button up) before pressing,
+# so a polled app (PICO-8 ~30fps = 33ms/frame) samples the new position at
+# least once before the button engages -> a tap is a point, not a drag line.
+PRESS_SETTLE = 0.06
+
+try:
+    with open('/sys/class/graphics/fb0/virtual_size') as f:
+        W, H = map(int, f.read().split(','))
+except OSError:
+    W, H = 320, 240
+
+try:
+    a, b, c, d, e, f_ = map(float, open(CAL_FILE).read().split())
+except (OSError, ValueError):
+    print(f'touch-mouse: missing or invalid {CAL_FILE}; run touch-cal first',
+          file=sys.stderr)
+    sys.exit(1)
+
+
+def create_uinput_pointer():
+    os.system('modprobe uinput 2>/dev/null')
+    fd = os.open(UINPUT, os.O_WRONLY | os.O_NONBLOCK)
+    fcntl.ioctl(fd, UI_SET_EVBIT, EV_KEY)
+    fcntl.ioctl(fd, UI_SET_KEYBIT, BTN_TOUCH)
+    fcntl.ioctl(fd, UI_SET_EVBIT, EV_ABS)
+    fcntl.ioctl(fd, UI_SET_ABSBIT, ABS_X)
+    fcntl.ioctl(fd, UI_SET_ABSBIT, ABS_Y)
+    absmax = [0] * 64
+    absmax[ABS_X] = W - 1
+    absmax[ABS_Y] = H - 1
+    name = b'Lyra Touch Mouse' + b'\x00' * 64
+    # struct uinput_user_dev: name[80], input_id, ff_effects_max,
+    #                         absmax[64], absmin[64], absfuzz[64], absflat[64]
+    uud = struct.pack('80sHHHHI' + '64i' * 4,
+                      name, BUS_USB, 0x1234, 0x567A, 1, 0,
+                      *(absmax + [0] * 192))
+    os.write(fd, uud)
+    fcntl.ioctl(fd, UI_DEV_CREATE)
+    return fd
+
+
+def send_event(fd, ev_type, code, value):
+    os.write(fd, struct.pack('llHHi', 0, 0, ev_type, code, value))
+
+
+def main():
+    try:
+        ev = open(EVDEV, 'rb', buffering=0)
+        fcntl.ioctl(ev, EVIOCGRAB, 1)  # raw events must not leak past us
+    except OSError as exc:
+        print(f'touch-mouse: {EVDEV}: {exc}', file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        ufd = create_uinput_pointer()
+    except OSError as exc:
+        print(f'touch-mouse: uinput: {exc}', file=sys.stderr)
+        sys.exit(1)
+
+    print(f'touch-mouse: {EVDEV} -> uinput ({W}x{H}) running', flush=True)
+
+    def emit_pos(sx, sy):
+        send_event(ufd, EV_ABS, ABS_X, sx)
+        send_event(ufd, EV_ABS, ABS_Y, sy)
+        send_event(ufd, EV_SYN, SYN_REPORT, 0)
+
+    x = y = None
+    touching = False           # BTN_TOUCH currently held down on the uinput dev
+    pending = False            # contact detected, not yet pressed
+    armed_at = None            # monotonic time the cursor reached the touch pt
+    last_sx = last_sy = None   # last emitted screen position
+    while True:
+        data = ev.read(16)
+        if len(data) < 16:
+            continue
+        _, _, t, code, v = struct.unpack('llHHi', data)
+
+        if t == EV_ABS and code == ABS_X:
+            x = v
+        elif t == EV_ABS and code == ABS_Y:
+            y = v
+        elif t == EV_KEY and code == BTN_TOUCH:
+            if v:
+                pending = True   # don't press until we have a position
+            else:
+                if touching:
+                    send_event(ufd, EV_KEY, BTN_TOUCH, 0)
+                    send_event(ufd, EV_SYN, SYN_REPORT, 0)
+                elif pending and armed_at is not None and last_sx is not None:
+                    # Released during the settle window (a fast tap): the app
+                    # never saw the press yet, so synthesize a full click at
+                    # the touch point right here.
+                    emit_pos(last_sx, last_sy)
+                    send_event(ufd, EV_KEY, BTN_TOUCH, 1)
+                    send_event(ufd, EV_SYN, SYN_REPORT, 0)
+                    send_event(ufd, EV_KEY, BTN_TOUCH, 0)
+                    send_event(ufd, EV_SYN, SYN_REPORT, 0)
+                touching = False
+                pending = False
+                armed_at = None
+        elif t == EV_SYN and x is not None and y is not None:
+            sx = int(a * x + b * y + c)
+            sy = int(d * x + e * y + f_)
+            sx = max(0, min(W - 1, sx))
+            sy = max(0, min(H - 1, sy))
+
+            if pending and not touching:
+                # New contact. Move the cursor to the touch point with the
+                # button UP and hold it there for PRESS_SETTLE seconds before
+                # pressing. PICO-8's devkit mouse is *polled* once per frame:
+                # if the move and the press land in the same frame, a drawing
+                # cart reads position+button together and draws a line from
+                # its previous point to here. The settle window guarantees the
+                # cart samples the new position (button up) for at least one
+                # frame first, so the press registers as a point, not a drag.
+                if armed_at is None:
+                    emit_pos(sx, sy)
+                    last_sx, last_sy = sx, sy
+                    armed_at = time.monotonic()
+                else:
+                    if (abs(sx - last_sx) >= TOUCH_DEADZONE or
+                            abs(sy - last_sy) >= TOUCH_DEADZONE):
+                        emit_pos(sx, sy)          # keep tracking, button up
+                        last_sx, last_sy = sx, sy
+                    if time.monotonic() - armed_at >= PRESS_SETTLE:
+                        send_event(ufd, EV_KEY, BTN_TOUCH, 1)
+                        send_event(ufd, EV_SYN, SYN_REPORT, 0)
+                        touching = True
+                        pending = False
+                        armed_at = None
+            elif touching:
+                # Held: only emit motion past a small deadzone. A stationary
+                # finger jitters by a pixel every ADS7846 sample; forwarding
+                # all of them floods the app's event queue (the "freeze") and
+                # turns a tap into a wobbly drag. Suppressing jitter keeps a
+                # tap a point while still allowing real drags.
+                if (abs(sx - last_sx) >= TOUCH_DEADZONE or
+                        abs(sy - last_sy) >= TOUCH_DEADZONE):
+                    emit_pos(sx, sy)
+                    last_sx, last_sy = sx, sy
+
+
+if __name__ == '__main__':
+    main()

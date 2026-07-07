@@ -1,0 +1,837 @@
+#!/usr/bin/env python3
+"""Bit-0 boot launcher.
+
+Draws a splash + 3-button menu (Terminal / PICO-8 / Calibrate) straight to
+/dev/fb0 (RGB565) and reads the Lyra UART Mouse (relative) and Lyra Touch
+Mouse (absolute, from the touch-mouse daemon) for pointer input. No
+DirectFB/SDL dependency, so it coexists with whatever the launched apps use.
+
+Started at boot by /etc/init.d/S99bit0-launcher.
+"""
+
+import os
+import re
+import sys
+import struct
+import fcntl
+import select
+import shutil
+import subprocess
+import time
+
+FBDEV = '/dev/fb0'
+
+EV_SYN, EV_KEY, EV_REL, EV_ABS = 0x00, 0x01, 0x02, 0x03
+REL_X, REL_Y, ABS_X, ABS_Y = 0, 1, 0, 1
+BTN_LEFT, BTN_TOUCH = 0x110, 0x14a
+
+MOUSE_NAME = 'Lyra UART Mouse'
+TOUCH_NAME = 'Lyra Touch Mouse'
+
+# ── colors (RGB565) ──────────────────────────────────────────────────────────
+C_BG     = 0x18C3  # dark gray
+C_TITLE  = 0xFD20  # orange
+C_BTN    = 0x39E7  # button face
+C_BTNHI  = 0xFD20  # hovered button face
+C_TEXT   = 0xFFFF
+C_TEXTHI = 0x0000
+C_BLACK  = 0x0000
+C_WHITE  = 0xFFFF
+
+# ── 5x7 font as ASCII art (6th column = spacing) ────────────────────────────
+FONT = {
+    'A': [" ### ", "#   #", "#   #", "#####", "#   #", "#   #", "#   #"],
+    'B': ["#### ", "#   #", "#   #", "#### ", "#   #", "#   #", "#### "],
+    'C': [" ####", "#    ", "#    ", "#    ", "#    ", "#    ", " ####"],
+    'D': ["#### ", "#   #", "#   #", "#   #", "#   #", "#   #", "#### "],
+    'E': ["#####", "#    ", "#    ", "#### ", "#    ", "#    ", "#####"],
+    'G': [" ####", "#    ", "#    ", "#  ##", "#   #", "#   #", " ####"],
+    'H': ["#   #", "#   #", "#   #", "#####", "#   #", "#   #", "#   #"],
+    'I': [" ### ", "  #  ", "  #  ", "  #  ", "  #  ", "  #  ", " ### "],
+    'L': ["#    ", "#    ", "#    ", "#    ", "#    ", "#    ", "#####"],
+    'M': ["#   #", "## ##", "# # #", "# # #", "#   #", "#   #", "#   #"],
+    'N': ["#   #", "##  #", "# # #", "#  ##", "#   #", "#   #", "#   #"],
+    'O': [" ### ", "#   #", "#   #", "#   #", "#   #", "#   #", " ### "],
+    'P': ["#### ", "#   #", "#   #", "#### ", "#    ", "#    ", "#    "],
+    'R': ["#### ", "#   #", "#   #", "#### ", "# #  ", "#  # ", "#   #"],
+    'S': [" ####", "#    ", "#    ", " ### ", "    #", "    #", "#### "],
+    'T': ["#####", "  #  ", "  #  ", "  #  ", "  #  ", "  #  ", "  #  "],
+    'U': ["#   #", "#   #", "#   #", "#   #", "#   #", "#   #", " ### "],
+    'W': ["#   #", "#   #", "#   #", "# # #", "# # #", "## ##", "#   #"],
+    'F': ["#####", "#    ", "#    ", "#### ", "#    ", "#    ", "#    "],
+    'J': ["  ###", "   # ", "   # ", "   # ", "   # ", "#  # ", " ##  "],
+    'K': ["#   #", "#  # ", "# #  ", "##   ", "# #  ", "#  # ", "#   #"],
+    'Q': [" ### ", "#   #", "#   #", "#   #", "# # #", "#  # ", " ## #"],
+    'V': ["#   #", "#   #", "#   #", "#   #", "#   #", " # # ", "  #  "],
+    'X': ["#   #", "#   #", " # # ", "  #  ", " # # ", "#   #", "#   #"],
+    'Y': ["#   #", "#   #", " # # ", "  #  ", "  #  ", "  #  ", "  #  "],
+    'Z': ["#####", "    #", "   # ", "  #  ", " #   ", "#    ", "#####"],
+    '1': ["  #  ", " ##  ", "  #  ", "  #  ", "  #  ", "  #  ", " ### "],
+    '2': [" ### ", "#   #", "    #", "   # ", "  #  ", " #   ", "#####"],
+    '3': [" ### ", "#   #", "    #", "  ## ", "    #", "#   #", " ### "],
+    '4': ["   # ", "  ## ", " # # ", "#  # ", "#####", "   # ", "   # "],
+    '5': ["#####", "#    ", "#### ", "    #", "    #", "#   #", " ### "],
+    '6': [" ### ", "#    ", "#    ", "#### ", "#   #", "#   #", " ### "],
+    '7': ["#####", "    #", "   # ", "  #  ", " #   ", " #   ", " #   "],
+    '9': [" ### ", "#   #", "#   #", " ####", "    #", "    #", " ### "],
+    '_': ["     ", "     ", "     ", "     ", "     ", "     ", "#####"],
+    '/': ["    #", "    #", "   # ", "  #  ", " #   ", "#    ", "#    "],
+    '0': [" ### ", "#   #", "#  ##", "# # #", "##  #", "#   #", " ### "],
+    '8': [" ### ", "#   #", "#   #", " ### ", "#   #", "#   #", " ### "],
+    '-': ["     ", "     ", "     ", "#####", "     ", "     ", "     "],
+    '.': ["     ", "     ", "     ", "     ", "     ", "     ", "  #  "],
+    'i': ["  #  ", "     ", " ##  ", "  #  ", "  #  ", "  #  ", " ### "],
+    't': ["  #  ", "  #  ", "#####", "  #  ", "  #  ", "  #  ", "   ##"],
+    ' ': ["     ", "     ", "     ", "     ", "     ", "     ", "     "],
+}
+GLYPH_W, GLYPH_H = 6, 7
+
+ARROW = [
+    "#       ",
+    "##      ",
+    "#*#     ",
+    "#**#    ",
+    "#***#   ",
+    "#****#  ",
+    "#*****# ",
+    "#******#",
+    "#***####",
+    "#*#**#  ",
+    "## #**# ",
+    "#   ##  ",
+]
+CUR_W, CUR_H = 8, 12
+
+POWER_ICON = [
+    "      ##      ",
+    "  ##  ##  ##  ",
+    " ##   ##   ## ",
+    "##    ##    ##",
+    "##    ##    ##",
+    "##          ##",
+    "##          ##",
+    " ##        ## ",
+    "  ##      ##  ",
+    "   ########   ",
+]
+
+GEAR_ICON = [
+    "     ###     ",
+    "     ###     ",
+    "   #######   ",
+    "  #########  ",
+    "  #########  ",
+    "#####   #####",
+    "#####   #####",
+    "#####   #####",
+    "  #########  ",
+    "  #########  ",
+    "   #######   ",
+    "     ###     ",
+    "     ###     ",
+]
+
+
+class Screen:
+    def __init__(self):
+        try:
+            with open('/sys/class/graphics/fb0/virtual_size') as f:
+                self.w, self.h = map(int, f.read().split(','))
+        except OSError:
+            self.w, self.h = 320, 240
+        self.fb = open(FBDEV, 'r+b', buffering=0)
+        self.scene = bytearray(self.w * self.h * 2)
+
+    def fill_rect(self, x, y, w, h, color):
+        px = struct.pack('<H', color)
+        row = px * w
+        for r in range(y, y + h):
+            off = (r * self.w + x) * 2
+            self.scene[off:off + w * 2] = row
+
+    def text(self, s, x, y, scale, color):
+        px = struct.pack('<H', color)
+        for ch in s:
+            glyph = FONT.get(ch, FONT[' '])
+            for gy, line in enumerate(glyph):
+                for gx, c in enumerate(line):
+                    if c == '#':
+                        self.fill_rect(x + gx * scale, y + gy * scale,
+                                       scale, scale, color)
+            x += GLYPH_W * scale
+
+    def text_width(self, s, scale):
+        return len(s) * GLYPH_W * scale
+
+    def flush(self, x=0, y=0, w=None, h=None):
+        w = self.w if w is None else w
+        h = self.h if h is None else h
+        for r in range(y, y + h):
+            off = (r * self.w + x) * 2
+            self.fb.seek(off)
+            self.fb.write(self.scene[off:off + w * 2])
+
+    def draw_cursor(self, cx, cy):
+        """Composite arrow over scene into a temp patch, write only that."""
+        for gy, line in enumerate(ARROW):
+            ry = cy + gy
+            if not (0 <= ry < self.h):
+                continue
+            off = (ry * self.w + cx) * 2
+            n = min(CUR_W, self.w - cx)
+            patch = bytearray(self.scene[off:off + n * 2])
+            for gx in range(n):
+                c = line[gx]
+                if c == '#':
+                    patch[gx * 2:gx * 2 + 2] = struct.pack('<H', C_BLACK)
+                elif c == '*':
+                    patch[gx * 2:gx * 2 + 2] = struct.pack('<H', C_WHITE)
+            self.fb.seek(off)
+            self.fb.write(patch)
+
+    def erase_cursor(self, cx, cy):
+        self.flush(cx, min(cy, self.h - 1),
+                   min(CUR_W, self.w - cx), min(CUR_H, self.h - cy))
+
+
+def find_event(name):
+    base = '/sys/class/input'
+    try:
+        nodes = sorted(os.listdir(base))
+    except OSError:
+        return None
+    for n in nodes:
+        if not n.startswith('event'):
+            continue
+        try:
+            with open(f'{base}/{n}/device/name') as f:
+                if f.read().strip() == name:
+                    return f'/dev/input/{n}'
+        except OSError:
+            continue
+    return None
+
+
+def open_inputs():
+    """Returns {fd_object: kind} for the mouse and touch devices."""
+    devs = {}
+    for name, kind in ((MOUSE_NAME, 'mouse'), (TOUCH_NAME, 'touch')):
+        path = find_event(name)
+        if path:
+            try:
+                f = open(path, 'rb', buffering=0)
+                os.set_blocking(f.fileno(), False)
+                devs[f] = kind
+            except OSError:
+                pass
+    return devs
+
+
+def close_inputs(devs):
+    for f in devs:
+        try:
+            f.close()
+        except OSError:
+            pass
+
+
+# ── apps ─────────────────────────────────────────────────────────────────────
+
+RETROARCH = '/usr/bin/retroarch'
+GBA_CORE = '/usr/lib/libretro/gpsp_libretro.so'
+ROM_DIR = '/root/roms'
+# gpSP refuses to run without a real GBA BIOS in the retroarch system dir.
+GBA_BIOS = '/root/.config/retroarch/system/gba_bios.bin'
+
+# ── SPI SD card (on-demand) ───────────────────────────────────────────────────
+# The SD slot sits on spi0 (CS2) sharing the bus with the display+touch. Leaving
+# mmc_spi bound makes it poll the card forever and stall the bus (display freeze),
+# so it lives UNBOUND. We bind it only to read a cart, then unbind to free the
+# bus before launching. Needs the DT mmc@2 node enabled (status="okay") so the
+# spi0.2 device exists; if it's disabled, sd_slot_present() is False.
+SD_SPI      = 'spi0.2'
+MMC_DRV     = '/sys/bus/spi/drivers/mmc_spi'
+SD_DEV_SYS  = '/sys/bus/spi/devices/' + SD_SPI
+SD_MOUNT    = '/mnt/sd'
+SD_CACHE    = '/root/pico-8/carts/sdcard'
+
+
+def _sysfs_write(path, val):
+    try:
+        with open(path, 'w') as f:
+            f.write(val)
+        return True
+    except OSError:
+        return False
+
+
+def sd_slot_present():
+    return os.path.exists(SD_DEV_SYS)
+
+
+def sd_bound():
+    return os.path.exists(SD_DEV_SYS + '/driver')
+
+
+def sd_release():
+    """Unbind mmc_spi so it stops polling the SPI bus."""
+    if sd_bound():
+        _sysfs_write(MMC_DRV + '/unbind', SD_SPI)
+
+
+def sd_enable():
+    if sd_slot_present() and not sd_bound():
+        _sysfs_write(MMC_DRV + '/bind', SD_SPI)
+
+
+def _mmcblk_base():
+    try:
+        return {d for d in os.listdir('/sys/block') if d.startswith('mmcblk')}
+    except OSError:
+        return set()
+
+
+def _find_mount(dev):
+    """Mountpoint of `dev` (e.g. mmcblk1) or any of its partitions, else None.
+    The hotplug daemon auto-mounts cards under /media/<name>."""
+    if not dev:
+        return None
+    try:
+        with open('/proc/mounts') as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2 and parts[0].startswith('/dev/' + dev):
+                    return parts[1].replace('\\040', ' ')
+    except OSError:
+        pass
+    return None
+
+
+def _kill_stale(*names):
+    # The MAX98357A amp is a single-stream PCM (no mixing): a leftover/orphaned
+    # instance holding /dev/snd/pcmC0D0p blocks the next app's audio entirely.
+    # Clear any stragglers before (re)launching.
+    for n in names:
+        subprocess.call(['killall', n],
+                        stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+
+
+def run_pico8(scr=None):
+    # pico-8 is proprietary and not shipped in the image; see docs/PICO8.md
+    # in the bit0-armbian repo for how to install it.
+    if not os.path.exists('/root/pico-8/pico-8.sh'):
+        if scr:
+            fullscreen_message(scr, 'PICO-8 NOT INSTALLED')
+            time.sleep(2.5)
+        return
+    _kill_stale('pico8_dyn')
+    subprocess.call(['/bin/sh', '/root/pico-8/pico-8.sh'],
+                    env=dict(os.environ, HOME='/root'))
+
+
+def run_pico8_cart(cart):
+    _kill_stale('pico8_dyn')
+    subprocess.call(['/root/pico-8/pico8_dyn', '-home', '/root/pico-8',
+                     '-windowed', '0', '-width', '256', '-height', '320',
+                     '-pixel_perfect', '0', '-run', cart],
+                    env=dict(os.environ, HOME='/root',
+                             SDL_VIDEODRIVER='directfb', SDL_AUDIODRIVER='alsa'))
+
+
+def run_sdcard(scr):
+    """Bind the SPI SD card, copy any PICO-8 cart to the cache, unbind to free
+    the bus, then launch the first cart found."""
+    if not sd_slot_present():
+        fullscreen_message(scr, 'SD SLOT DISABLED')
+        time.sleep(2)
+        return
+    fullscreen_message(scr, 'READING SD...')
+    sd_release()                              # clean state, so bind yields a new dev
+    time.sleep(0.4)
+    before = _mmcblk_base()
+    sd_enable()
+
+    dev = None
+    for _ in range(40):                       # up to ~4s for the card to init
+        time.sleep(0.1)
+        new = sorted(d for d in (_mmcblk_base() - before) if 'p' not in d)
+        if new:
+            dev = new[0]
+            break
+    if not dev:
+        fullscreen_message(scr, 'NO SD CARD')
+        sd_release(); time.sleep(2)
+        return
+
+    # The hotplug daemon auto-mounts the card under /media/<name>. Wait for
+    # that; only mount it ourselves if no automount appears.
+    mountpoint = None
+    own_mount = False
+    for _ in range(30):                       # up to ~3s for the automount
+        mountpoint = _find_mount(dev)
+        if mountpoint:
+            break
+        time.sleep(0.1)
+    if not mountpoint:
+        node = '/dev/%sp1' % dev
+        if not os.path.exists(node):
+            node = '/dev/' + dev
+        os.makedirs(SD_MOUNT, exist_ok=True)
+        if any(subprocess.call(['mount', '-o', 'ro', '-t', fs, node, SD_MOUNT],
+                               stderr=subprocess.DEVNULL) == 0
+               for fs in ('exfat', 'vfat', 'auto')):
+            mountpoint, own_mount = SD_MOUNT, True
+    if not mountpoint:
+        fullscreen_message(scr, 'CANT READ CARD')
+        sd_release(); time.sleep(2)
+        return
+
+    found = []
+    for root, _dirs, files in os.walk(mountpoint):
+        if 'System Volume Information' in root:
+            continue
+        for fn in sorted(files):
+            low = fn.lower()
+            if low.endswith('.p8.png') or low.endswith('.p8'):
+                found.append(os.path.join(root, fn))
+        if len(found) >= 30:
+            break
+
+    cached = []
+    if found:
+        fullscreen_message(scr, 'COPYING...')
+        os.makedirs(SD_CACHE, exist_ok=True)
+        for src in found:
+            dst = os.path.join(SD_CACHE, os.path.basename(src))
+            try:
+                shutil.copyfile(src, dst)
+                cached.append(dst)
+            except OSError:
+                pass
+
+    # Release the bus (unmount + unbind) BEFORE launching, as requested.
+    subprocess.call(['umount', mountpoint], stderr=subprocess.DEVNULL)
+    sd_release()
+
+    if not cached:
+        fullscreen_message(scr, 'NO PICO-8 GAME')
+        time.sleep(2)
+        return
+
+    fullscreen_message(scr, 'LAUNCHING...')
+    run_pico8_cart(cached[0])                 # extra carts stay in SD_CACHE
+
+
+def run_gba(rom):
+    _kill_stale('retroarch')
+    # key bindings live in /root/.config/retroarch/retroarch.cfg
+    subprocess.call([RETROARCH, '-L', GBA_CORE, rom],
+                    env=dict(os.environ, HOME='/root',
+                             SDL_VIDEODRIVER='directfb',
+                             SDL_AUDIODRIVER='alsa'))
+
+
+def gba_launch(scr, rom):
+    # gpSP can't boot without the BIOS; show a clear message instead of a
+    # silent flash back to the menu.
+    if not os.path.exists(GBA_BIOS):
+        fullscreen_message(scr, 'GBA BIOS MISSING')
+        time.sleep(2.5)
+        return
+    run_gba(rom)
+
+
+def run_calibrate():
+    subprocess.call('systemctl stop touch-mouse; '
+                    '/usr/local/bin/touch-cal; '
+                    'systemctl start touch-mouse', shell=True)
+    time.sleep(2)  # let the uinput device reappear before reopening inputs
+
+
+# ── volume (ALSA Master via amixer) ───────────────────────────────────────────
+
+def get_volume():
+    try:
+        out = subprocess.check_output(['amixer', 'get', 'Master'],
+                                      stderr=subprocess.DEVNULL).decode()
+        m = re.search(r'\[(\d+)%\]', out)
+        return int(m.group(1)) if m else 0
+    except Exception:
+        return 0
+
+
+def vol_set(pct):
+    pct = max(0, min(100, int(pct)))
+    subprocess.call(['amixer', '-q', 'set', 'Master', '%d%%' % pct],
+                    stderr=subprocess.DEVNULL)
+    return pct
+
+
+def run_terminal():
+    # fbcon renders the VT on fb0; the Lyra UART Keyboard has a kbd handler,
+    # so it types straight into the console. Exiting the shell returns here.
+    # -c 2 is mandatory: busybox openvt's free-VT query asks /dev/console,
+    # which is the serial port on this board, and fails with "can't find
+    # open VT". -f forces reuse of VT2 on repeated launches.
+    # Plain non-login shell: `sh -l` would source /root/.profile, which
+    # chains into bash and whatever its rc files start.
+    if shutil.which('fbterm'):
+        cmd = ['openvt', '-f', '-c', '2', '-s', '-w', '--', 'fbterm']
+    else:
+        cmd = ['openvt', '-f', '-c', '2', '-s', '-w', '--', '/bin/sh']
+    subprocess.call(cmd, env=dict(os.environ, HOME='/root', TERM='linux'))
+    subprocess.call(['chvt', '1'])  # make sure the VT with our fb is active
+
+
+# ── UI ───────────────────────────────────────────────────────────────────────
+
+def splash(scr):
+    scr.fill_rect(0, 0, scr.w, scr.h, C_BLACK)
+    s = 6
+    tw = scr.text_width('Bit-0', s)
+    scr.text('Bit-0', (scr.w - tw) // 2, (scr.h - GLYPH_H * s) // 2 - 14, s, C_WHITE)
+    bar_y = (scr.h + GLYPH_H * s) // 2
+    scr.fill_rect((scr.w - tw) // 2, bar_y, tw, 4, C_TITLE)
+    scr.flush()
+    time.sleep(2.2)
+
+
+BTN_W = 260
+BTN_TOP = 34            # below the title
+BTN_BOTTOM_PAD = 10     # margin above the screen bottom
+
+
+def column_from(scr, entries, top):
+    """Distribute entries evenly from `top` down to the screen bottom."""
+    n = len(entries)
+    x = (scr.w - BTN_W) // 2
+    avail = (scr.h - BTN_BOTTOM_PAD) - top
+    slot = avail / n
+    gap = min(16.0, slot * 0.28)
+    bh = min(int(slot - gap), 48)
+    out = []
+    for i, (lab, extra) in enumerate(entries):
+        y = int(top + i * slot + (slot - bh) / 2)
+        out.append({'label': lab, **extra, 'x': x, 'y': y, 'w': BTN_W, 'h': bh})
+    return out
+
+
+def column(scr, entries):
+    return column_from(scr, entries, BTN_TOP)
+
+
+# Volume slider geometry on the settings page (and its touch target).
+SLIDER_X, SLIDER_Y, SLIDER_H = 24, 50, 26
+
+
+def make_pages(scr):
+    main = column(scr, [('TERMINAL', {'app': run_terminal}),
+                        ('PICO-8', {'app': (lambda: run_pico8(scr))}),
+                        ('GBA', {'goto': 'gba'}),
+                        ('SD CARD', {'app': (lambda: run_sdcard(scr))})])
+    main.append({'label': '', 'icon': GEAR_ICON, 'goto': 'settings',
+                 'x': scr.w - 36, 'y': 6, 'w': 30, 'h': 26})
+    slider = {'slider': True, 'x': SLIDER_X, 'y': SLIDER_Y,
+              'w': scr.w - 2 * SLIDER_X, 'h': SLIDER_H}
+    settings = [slider] + column_from(scr, [
+        ('CALIBRATE', {'app': run_calibrate}),
+        ('RESTART', {'cmd': 'sync; reboot', 'msg': 'RESTARTING...'}),
+        ('POWER OFF', {'cmd': 'sync; poweroff', 'msg': 'POWERING OFF'}),
+        ('BACK', {'goto': 'main'})], top=SLIDER_Y + SLIDER_H + 16)
+    return {'main': main, 'settings': settings}
+
+
+def slider_pct(b, x):
+    """Volume % for a pointer x over slider b (quantized to 5%)."""
+    pct = (x - b['x']) * 100.0 / max(1, b['w'])
+    return max(0, min(100, int(round(pct / 5.0) * 5)))
+
+
+def draw_slider(scr, b, hover):
+    """Volume slider on the settings page: label, track + fill + knob, and %."""
+    vol = get_volume()
+    bx, by, bw, bh = b['x'], b['y'], b['w'], b['h']
+    scr.fill_rect(bx, by - 18, bw, 16, C_BG)              # clear label area
+    scr.text('VOLUME', bx, by - 18, 2, C_TITLE)
+    scr.fill_rect(bx, by, bw, bh, C_WHITE)                # border
+    scr.fill_rect(bx + 1, by + 1, bw - 2, bh - 2, C_BTN)  # groove
+    fillw = int((bw - 2) * vol / 100)
+    if fillw > 0:
+        scr.fill_rect(bx + 1, by + 1, fillw, bh - 2,
+                      C_BTNHI if hover else C_TITLE)
+    kx = bx + min(fillw, bw - 4)
+    scr.fill_rect(kx, by - 3, 4, bh + 6, C_WHITE)         # knob
+    txt = str(vol)
+    scr.text(txt, bx + bw - scr.text_width(txt, 2) - 6,
+             by + (bh - GLYPH_H * 2) // 2, 2, C_TEXT)
+    scr.flush(bx, by - 18, bw + 4, bh + 24)
+
+
+def make_gba_page(scr):
+    """Built on entry so newly added ROMs show up without a restart. Scans
+    /root/roms recursively (ROMs are often dropped in a /root/roms/gba subdir)."""
+    roms = []
+    for root, _dirs, files in os.walk(ROM_DIR):
+        for f in files:
+            if f.lower().endswith(('.gba', '.zip')):
+                roms.append(os.path.join(root, f))
+    roms.sort(key=lambda p: os.path.basename(p).lower())
+    entries = [(os.path.splitext(os.path.basename(p))[0].upper()[:21],
+                {'app': (lambda q=p: gba_launch(scr, q))})
+               for p in roms[:4]]
+    if not roms:
+        entries = [('NO ROMS IN /ROOT/ROMS', {})]
+    entries.append(('BACK', {'goto': 'main'}))
+    return column(scr, entries)
+
+
+def draw_button(scr, b, hover):
+    if b.get('slider'):
+        draw_slider(scr, b, hover)
+        return
+    face = C_BTNHI if hover else C_BTN
+    txt = C_TEXTHI if hover else C_TEXT
+    scr.fill_rect(b['x'], b['y'], b['w'], b['h'], C_WHITE)
+    scr.fill_rect(b['x'] + 2, b['y'] + 2, b['w'] - 4, b['h'] - 4, face)
+    if b.get('icon'):
+        icon = b['icon']
+        iw, ih = len(icon[0]), len(icon)
+        ox = b['x'] + (b['w'] - iw) // 2
+        oy = b['y'] + (b['h'] - ih) // 2
+        for gy, line in enumerate(icon):
+            for gx, ch in enumerate(line):
+                if ch == '#':
+                    scr.fill_rect(ox + gx, oy + gy, 1, 1, txt)
+    else:
+        s = 2
+        tw = scr.text_width(b['label'], s)
+        scr.text(b['label'], b['x'] + (b['w'] - tw) // 2,
+                 b['y'] + (b['h'] - GLYPH_H * s) // 2, s, txt)
+    scr.flush(b['x'], b['y'], b['w'], b['h'])
+
+
+def draw_page(scr, name, btns, hover_idx):
+    scr.fill_rect(0, 0, scr.w, scr.h, C_BG)
+    title = 'BIT-0' if name == 'main' else name.upper()
+    s = 2
+    tw = scr.text_width(title, s)
+    scr.text(title, (scr.w - tw) // 2, 12, s, C_TITLE)
+    scr.flush()
+    for i, b in enumerate(btns):
+        draw_button(scr, b, i == hover_idx)
+
+
+def fullscreen_message(scr, msg):
+    scr.fill_rect(0, 0, scr.w, scr.h, C_BLACK)
+    s = 2
+    tw = scr.text_width(msg, s)
+    scr.text(msg, (scr.w - tw) // 2, (scr.h - GLYPH_H * s) // 2, s, C_WHITE)
+    scr.flush()
+
+
+def hit(btns, x, y):
+    for i, b in enumerate(btns):
+        if b['x'] <= x < b['x'] + b['w'] and b['y'] <= y < b['y'] + b['h']:
+            return i
+    return -1
+
+
+_lock = None  # must stay open for the process lifetime
+
+
+def acquire_singleton():
+    """Race-free single-instance guard via flock (PID scanning races when
+    two respawn loops start children simultaneously - they mutually abort)."""
+    global _lock
+    _lock = open('/var/run/bit0-launcher.lock', 'w')
+    try:
+        fcntl.flock(_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+
+
+def main():
+    if not acquire_singleton():
+        print('bit0-launcher: another instance is running, exiting', flush=True)
+        sys.exit(0)
+    # Keep the SPI SD card unbound by default so it doesn't poll the shared bus
+    # and freeze the display; the SD CARD menu binds it on demand.
+    sd_release()
+    # Clear any app orphaned by a previous launcher restart still holding the
+    # single-stream audio amp (would mute the next launch).
+    _kill_stale('pico8_dyn', 'retroarch')
+    # keep fbcon from blinking its cursor over our pixels
+    try:
+        with open('/sys/class/graphics/fbcon/cursor_blink', 'w') as f:
+            f.write('0')
+    except OSError:
+        pass
+    try:
+        with open('/dev/tty1', 'w') as t:
+            t.write('\033[?25l\033[2J')
+    except OSError:
+        pass
+
+    scr = Screen()
+    # splash only on the first start after boot (/tmp is tmpfs); respawns
+    # and manual restarts go straight to the menu
+    if not os.path.exists('/tmp/.bit0-splash-shown'):
+        splash(scr)
+        open('/tmp/.bit0-splash-shown', 'w').close()
+    pages = make_pages(scr)
+    page = 'main'
+    btns = pages[page]
+
+    cx, cy = scr.w // 2, scr.h // 2
+    hover = -1
+    devs = open_inputs()
+    print(f'bit0-launcher: inputs: {sorted(devs.values())}', flush=True)
+    draw_page(scr, page, btns, hover)
+    scr.draw_cursor(cx, cy)
+    scr._last_cur = (cx, cy)
+
+    ax = ay = None  # latest absolute touch sample
+    pend = {'mouse': False, 'touch': False}  # button-down awaiting SYN
+    held = False    # pointer button currently down (for slider drag)
+    while True:
+        if not devs:  # nothing to read - retry discovery
+            time.sleep(1)
+            devs = open_inputs()
+            continue
+
+        r, _, _ = select.select(list(devs), [], [], 5)
+        if not r and len(set(devs.values())) < 2:
+            # idle and missing a device (e.g. touch daemon started late):
+            # rescan so hot-(re)started devices get picked up
+            close_inputs(devs)
+            devs = open_inputs()
+            continue
+        clicked = False
+        moved = False
+        lost = False
+        for f in r:
+            kind = devs[f]
+            while True:  # drain everything queued on this fd
+                try:
+                    data = f.read(16)
+                except OSError:
+                    data = b''
+                if data is None:        # EAGAIN - queue empty
+                    break
+                if len(data) < 16:      # device went away (daemon restart)
+                    lost = True
+                    break
+                _, _, t, code, v = struct.unpack('llHHi', data)
+                if kind == 'mouse':
+                    if t == EV_REL and code == REL_X:
+                        cx += v
+                        moved = True
+                    elif t == EV_REL and code == REL_Y:
+                        cy += v
+                        moved = True
+                    elif t == EV_KEY and code == BTN_LEFT:
+                        if v == 1:
+                            pend['mouse'] = True
+                            held = True
+                        else:
+                            held = False
+                    elif t == EV_SYN and pend['mouse']:
+                        clicked = True
+                        pend['mouse'] = False
+                else:  # touch: act only on SYN so clicks use synced coords
+                    if t == EV_ABS and code == ABS_X:
+                        ax = v
+                    elif t == EV_ABS and code == ABS_Y:
+                        ay = v
+                    elif t == EV_KEY and code == BTN_TOUCH:
+                        if v == 1:
+                            pend['touch'] = True
+                            held = True
+                        else:
+                            held = False
+                    elif t == EV_SYN:
+                        if ax is not None and ay is not None:
+                            cx, cy = ax, ay
+                            moved = True
+                        if pend['touch']:
+                            clicked = True
+                            pend['touch'] = False
+        if lost:
+            close_inputs(devs)
+            devs = open_inputs()
+            continue
+
+        cx = max(0, min(scr.w - 1, cx))
+        cy = max(0, min(scr.h - 1, cy))
+
+        if moved or clicked:
+            new_hover = hit(btns, cx, cy)
+            scr.erase_cursor(*getattr(scr, '_last_cur', (cx, cy)))
+            on_slider = new_hover >= 0 and btns[new_hover].get('slider')
+            if on_slider and (clicked or held):
+                # tap or drag on the volume slider sets the level by position
+                target = slider_pct(btns[new_hover], cx)
+                if target != getattr(scr, '_slider_last', None):
+                    vol_set(target)
+                    scr._slider_last = target
+                if hover >= 0 and hover != new_hover:
+                    draw_button(scr, btns[hover], False)
+                hover = new_hover
+                draw_slider(scr, btns[new_hover], True)
+                clicked = False  # consume: don't treat as a button activation
+            else:
+                scr._slider_last = None
+                if new_hover != hover:
+                    if hover >= 0:
+                        draw_button(scr, btns[hover], False)
+                    if new_hover >= 0:
+                        draw_button(scr, btns[new_hover], True)
+                    hover = new_hover
+            scr.draw_cursor(cx, cy)
+            scr._last_cur = (cx, cy)
+
+        if clicked and hover >= 0:
+            b = btns[hover]
+            if 'goto' in b:
+                page = b['goto']
+                if page == 'gba':
+                    pages['gba'] = make_gba_page(scr)
+                btns = pages[page]
+                hover = -1
+            elif 'cmd' in b:
+                print(f'bit0-launcher: {b["msg"]}', flush=True)
+                fullscreen_message(scr, b['msg'])
+                os.system(b['cmd'])
+                time.sleep(60)  # init takes over from here
+            elif 'act' in b:
+                # in-page action (e.g. volume +/-): run it and stay on the
+                # page; the trailing redraw refreshes the volume bar.
+                try:
+                    b['act']()
+                except Exception as exc:
+                    print(f'bit0-launcher: act: {exc}', flush=True)
+            elif 'app' in b:
+                label = b['label']
+                print(f'bit0-launcher: launching {label}', flush=True)
+                fullscreen_message(scr, 'LOADING...')
+                close_inputs(devs)
+                try:
+                    b['app']()
+                except Exception as exc:
+                    print(f'bit0-launcher: {label}: {exc}', flush=True)
+                devs = open_inputs()
+                page = 'main'
+                btns = pages[page]
+                hover = -1
+                ax = ay = None
+            else:
+                clicked = False  # inert button (e.g. "NO ROMS")
+            if clicked:
+                draw_page(scr, page, btns, hover)
+                scr.draw_cursor(cx, cy)
+                scr._last_cur = (cx, cy)
+
+
+if __name__ == '__main__':
+    main()

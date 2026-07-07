@@ -1,0 +1,12 @@
+[Unit]
+Description=Bit0 UART HID bridge (QMK keyboard on UART2 -> uinput)
+After=dev-ttyS2.device systemd-modules-load.service
+Wants=dev-ttyS2.device
+
+[Service]
+ExecStart=/usr/local/bin/uart-hid-bridge
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

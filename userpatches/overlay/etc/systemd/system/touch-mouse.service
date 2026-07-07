@@ -1,0 +1,13 @@
+[Unit]
+Description=Bit0 touch-mouse (TSC2046 raw -> calibrated absolute pointer)
+After=systemd-modules-load.service
+# No calibration yet -> stay off; the launcher's CALIBRATE entry creates it.
+ConditionPathExists=/etc/touch-mouse.cal
+
+[Service]
+ExecStart=/usr/local/bin/touch-mouse
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

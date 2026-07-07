@@ -1,0 +1,313 @@
+#!/usr/bin/env python3
+"""
+UART → uinput keyboard/mouse/consumer bridge.
+
+Reads HID reports from RP2040 over UART2 and injects them as Linux input
+events via /dev/uinput.
+
+Frame format (all types):
+  0xAA  <type: 1 byte>  <length: 1 byte>  <payload: length bytes>
+
+Report types:
+  0x01  TYPE_KBD   – 8-byte boot keyboard report [mods, rsvd, key1..key6]
+  0x02  TYPE_NKRO  – NKRO bitfield (ignored here)
+  0x03  TYPE_MOUSE – mouse report [buttons, x, y, v, h]; QMK MOUSE_SHARED_EP
+                     builds prepend report_id (0x02), which is stripped
+  0x04  TYPE_EXTRA – 3-byte consumer/system report [report_id, usage_lo, usage_hi]
+  0xFE  TYPE_HELLO – heartbeat, no payload
+  0xFF  TYPE_READY – Lyra→RP2040 beacon
+"""
+
+import os
+import sys
+import struct
+import fcntl
+import time
+import serial
+
+UART_DEV        = "/dev/ttyS2"
+UART_BAUD       = 115200
+UINPUT          = "/dev/uinput"
+MAGIC           = 0xAA
+TYPE_KBD        = 0x01
+TYPE_NKRO       = 0x02
+TYPE_MOUSE      = 0x03
+TYPE_EXTRA      = 0x04
+TYPE_HELLO      = 0xFE
+TYPE_READY      = 0xFF
+READY_BEACON    = bytes([MAGIC, TYPE_READY, 0x01, 0x52])
+READY_INTERVAL  = 5.0
+
+# OUT2 must be asserted so the dw-apb-uart interrupt output reaches the GIC.
+TIOCMBIS   = 0x5416
+TIOCM_OUT2 = 0x4000
+
+# uinput ioctls (ARM 32-bit Linux)
+UI_SET_EVBIT  = 0x40045564
+UI_SET_KEYBIT = 0x40045565
+UI_SET_RELBIT = 0x40045566
+UI_DEV_CREATE = 0x5501
+
+EV_SYN    = 0x00
+EV_KEY    = 0x01
+EV_REL    = 0x02
+SYN_REPORT = 0
+BUS_USB   = 0x03
+
+REL_X      = 0x00
+REL_Y      = 0x01
+REL_HWHEEL = 0x06
+REL_WHEEL  = 0x08
+
+BTN_LEFT   = 0x110
+BTN_RIGHT  = 0x111
+BTN_MIDDLE = 0x112
+BTN_SIDE   = 0x113
+BTN_EXTRA_ = 0x114   # trailing _ to avoid shadowing builtin
+
+# HID keycode → Linux evdev keycode (usage page 0x07)
+HID_TO_LINUX = [
+    0,   0,   0,   0,   30,  48,  46,  32,  # 0x00-0x07
+    18,  33,  34,  35,  23,  36,  37,  38,  # 0x08-0x0F
+    50,  49,  24,  25,  16,  19,  31,  20,  # 0x10-0x17
+    22,  47,  17,  45,  21,  44,  2,   3,   # 0x18-0x1F
+    4,   5,   6,   7,   8,   9,   10,  11,  # 0x20-0x27
+    28,  1,   14,  15,  57,  12,  13,  26,  # 0x28-0x2F
+    27,  43,  43,  39,  40,  41,  51,  52,  # 0x30-0x37
+    53,  58,  59,  60,  61,  62,  63,  64,  # 0x38-0x3F
+    65,  66,  67,  68,  87,  88,  99,  70,  # 0x40-0x47
+    119, 110, 102, 104, 111, 107, 109, 106, # 0x48-0x4F
+    105, 108, 103, 69,  98,  55,  74,  78,  # 0x50-0x57
+    96,  79,  80,  81,  75,  76,  77,  71,  # 0x58-0x5F
+    72,  73,  82,  83,  86,  127, 116, 117, # 0x60-0x67
+    183, 184, 185, 186, 187, 188, 189, 190, # 0x68-0x6F
+    191, 192, 193, 194, 134, 138, 130, 132, # 0x70-0x77
+    128, 129, 131, 137, 133, 135, 136, 113, # 0x78-0x7F
+]
+
+# Modifier byte bits → Linux keycodes
+MODIFIERS = [29, 42, 56, 125, 97, 54, 100, 126]
+
+# QMK consumer usage ID (report_id == 2) → Linux keycode
+CONSUMER_TO_LINUX = {
+    0x006F: 225,  # Brightness Up    → KEY_BRIGHTNESSUP
+    0x0070: 224,  # Brightness Down  → KEY_BRIGHTNESSDOWN
+    0x00B5: 163,  # Next Track       → KEY_NEXTSONG
+    0x00B6: 165,  # Prev Track       → KEY_PREVIOUSSONG
+    0x00B7: 166,  # Stop             → KEY_STOPCD
+    0x00CD: 164,  # Play/Pause       → KEY_PLAYPAUSE
+    0x00E2: 113,  # Mute             → KEY_MUTE
+    0x00E9: 115,  # Volume Up        → KEY_VOLUMEUP
+    0x00EA: 114,  # Volume Down      → KEY_VOLUMEDOWN
+    0x0183: 226,  # Launch Media     → KEY_MEDIA
+    0x0192: 140,  # Calculator       → KEY_CALC
+    0x018A: 155,  # Launch Mail      → KEY_MAIL
+    0x0221: 217,  # Search           → KEY_SEARCH
+    0x0223: 172,  # Go Home          → KEY_HOMEPAGE
+    0x0224: 158,  # Back             → KEY_BACK
+    0x0225: 159,  # Forward          → KEY_FORWARD
+}
+
+# QMK system control usage ID (report_id == 3) → Linux keycode
+SYSTEM_TO_LINUX = {
+    0x81: 116,  # Power   → KEY_POWER
+    0x82: 142,  # Sleep   → KEY_SLEEP
+    0x83: 143,  # Wake Up → KEY_WAKEUP
+}
+
+# Volume consumer usages (report_id == 4) driven straight to ALSA. DirectFB
+# grabs the uinput keyboard exclusively while pico8/SDL runs, so injecting
+# KEY_VOLUME* + relying on triggerhappy fails in-game. Running amixer from the
+# bridge (the input source) works everywhere.
+VOL_CMDS = {
+    0x00E9: "/usr/bin/amixer -q set Master 10%+ >/dev/null 2>&1",  # Volume Up
+    0x00EA: "/usr/bin/amixer -q set Master 10%- >/dev/null 2>&1",  # Volume Down
+}
+
+
+def send_event(fd, ev_type, code, value):
+    # struct input_event: timeval(2×long=8B) + type(u16) + code(u16) + value(s32)
+    os.write(fd, struct.pack('llHHi', 0, 0, ev_type, code, value))
+
+
+def create_uinput_keyboard():
+    os.system('modprobe uinput 2>/dev/null')
+    fd = os.open(UINPUT, os.O_WRONLY | os.O_NONBLOCK)
+    fcntl.ioctl(fd, UI_SET_EVBIT, EV_SYN)
+    fcntl.ioctl(fd, UI_SET_EVBIT, EV_KEY)
+    for k in range(256):
+        fcntl.ioctl(fd, UI_SET_KEYBIT, k)
+    name = b'Lyra UART Keyboard' + b'\x00' * 62
+    uud = struct.pack('80sHHHHI' + '64i' * 4,
+                      name, BUS_USB, 0x1234, 0x5678, 1, 0,
+                      *([0] * 256))
+    os.write(fd, uud)
+    fcntl.ioctl(fd, UI_DEV_CREATE)
+    time.sleep(0.5)
+    return fd
+
+
+def create_uinput_mouse():
+    fd = os.open(UINPUT, os.O_WRONLY | os.O_NONBLOCK)
+    fcntl.ioctl(fd, UI_SET_EVBIT, EV_SYN)
+    fcntl.ioctl(fd, UI_SET_EVBIT, EV_KEY)
+    for btn in (BTN_LEFT, BTN_RIGHT, BTN_MIDDLE, BTN_SIDE, BTN_EXTRA_):
+        fcntl.ioctl(fd, UI_SET_KEYBIT, btn)
+    fcntl.ioctl(fd, UI_SET_EVBIT, EV_REL)
+    for rel in (REL_X, REL_Y, REL_WHEEL, REL_HWHEEL):
+        fcntl.ioctl(fd, UI_SET_RELBIT, rel)
+    name = b'Lyra UART Mouse' + b'\x00' * 65
+    uud = struct.pack('80sHHHHI' + '64i' * 4,
+                      name, BUS_USB, 0x1234, 0x5679, 1, 0,
+                      *([0] * 256))
+    os.write(fd, uud)
+    fcntl.ioctl(fd, UI_DEV_CREATE)
+    time.sleep(0.5)
+    return fd
+
+
+def hid_to_linux(code):
+    return HID_TO_LINUX[code] if code < len(HID_TO_LINUX) else 0
+
+
+def main():
+    try:
+        uart = serial.Serial(UART_DEV, UART_BAUD, timeout=READY_INTERVAL)
+        fcntl.ioctl(uart.fileno(), TIOCMBIS, struct.pack('I', TIOCM_OUT2))
+    except serial.SerialException as e:
+        print(f"uart-hid-bridge: {UART_DEV}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        ufd = create_uinput_keyboard()
+        mfd = create_uinput_mouse()
+    except OSError as e:
+        print(f"uart-hid-bridge: uinput: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    uart.write(READY_BEACON)
+    uart.flush()
+    print(f"uart-hid-bridge: {UART_DEV} -> uinput running, sent READY beacon", flush=True)
+
+    prev_keys       = set()
+    prev_mod        = 0
+    prev_mouse_btns = 0
+    prev_extra_key  = 0  # linux keycode of currently held consumer/system key
+    prev_extra_usage = 0  # raw consumer usage, for volume press-edge detection
+
+    while True:
+        b = uart.read(1)
+        if not b:
+            uart.write(READY_BEACON)
+            uart.flush()
+            continue
+        if b[0] != MAGIC:
+            continue
+
+        header = uart.read(2)
+        if len(header) < 2:
+            continue
+        frame_type = header[0]
+        length     = header[1]
+
+        if frame_type == TYPE_HELLO:
+            if length:
+                uart.read(length)
+            uart.write(READY_BEACON)
+            uart.flush()
+            continue
+
+        payload = uart.read(length) if length else b''
+        if len(payload) < length:
+            continue
+
+        # ── Keyboard (boot protocol) ────────────────────────────────────────
+        if frame_type == TYPE_KBD:
+            if len(payload) < 8:
+                continue
+            mod  = payload[0]
+            keys = set(payload[2:8]) - {0}
+
+            for bit, lk in enumerate(MODIFIERS):
+                if bool((prev_mod >> bit) & 1) != bool((mod >> bit) & 1):
+                    send_event(ufd, EV_KEY, lk, int((mod >> bit) & 1))
+
+            for hid in prev_keys - keys:
+                lk = hid_to_linux(hid)
+                if lk:
+                    send_event(ufd, EV_KEY, lk, 0)
+
+            for hid in keys - prev_keys:
+                lk = hid_to_linux(hid)
+                if lk:
+                    send_event(ufd, EV_KEY, lk, 1)
+
+            send_event(ufd, EV_SYN, SYN_REPORT, 0)
+            prev_keys = keys
+            prev_mod  = mod
+
+        # ── Mouse ───────────────────────────────────────────────────────────
+        elif frame_type == TYPE_MOUSE:
+            if len(payload) < 5:
+                continue
+            # QMK with MOUSE_SHARED_EP (the default) prepends report_id
+            # (REPORT_ID_MOUSE == 2) to report_mouse_t; strip it if present.
+            if len(payload) >= 6 and payload[0] == 2:
+                payload = payload[1:]
+            buttons = payload[0]
+            # QMK report_mouse_t: buttons, x, y, v (vert scroll), h (horiz scroll)
+            x, y, v, h = struct.unpack('bbbb', payload[1:5])
+
+            for bit, btn in enumerate((BTN_LEFT, BTN_RIGHT, BTN_MIDDLE)):
+                cur = bool((buttons >> bit) & 1)
+                prv = bool((prev_mouse_btns >> bit) & 1)
+                if cur != prv:
+                    send_event(mfd, EV_KEY, btn, int(cur))
+
+            if x: send_event(mfd, EV_REL, REL_X, x)
+            if y: send_event(mfd, EV_REL, REL_Y, y)
+            if v: send_event(mfd, EV_REL, REL_WHEEL, v)
+            if h: send_event(mfd, EV_REL, REL_HWHEEL, h)
+
+            send_event(mfd, EV_SYN, SYN_REPORT, 0)
+            prev_mouse_btns = buttons
+
+        # ── Consumer / System keys ──────────────────────────────────────────
+        elif frame_type == TYPE_EXTRA:
+            if len(payload) < 3:
+                continue
+            report_id = payload[0]
+            usage     = payload[1] | (payload[2] << 8)
+
+            # Volume keys → ALSA directly (works even when DirectFB has grabbed
+            # the uinput keyboard, e.g. inside pico8). Act once per press.
+            if report_id == 4 and usage in VOL_CMDS:
+                if usage != prev_extra_usage:
+                    os.system(VOL_CMDS[usage])
+                prev_extra_usage = usage
+                continue
+            if report_id == 4 and usage == 0 and prev_extra_usage in VOL_CMDS:
+                prev_extra_usage = 0   # volume key released
+                continue
+            prev_extra_usage = usage
+
+            lk = 0
+            if usage:
+                if report_id == 3:   # REPORT_ID_SYSTEM
+                    lk = SYSTEM_TO_LINUX.get(usage, 0)
+                elif report_id == 4: # REPORT_ID_CONSUMER
+                    lk = CONSUMER_TO_LINUX.get(usage, 0)
+
+            if prev_extra_key and prev_extra_key != lk:
+                send_event(ufd, EV_KEY, prev_extra_key, 0)
+                send_event(ufd, EV_SYN, SYN_REPORT, 0)
+
+            if lk and lk != prev_extra_key:
+                send_event(ufd, EV_KEY, lk, 1)
+                send_event(ufd, EV_SYN, SYN_REPORT, 0)
+
+            prev_extra_key = lk
+
+
+if __name__ == '__main__':
+    main()

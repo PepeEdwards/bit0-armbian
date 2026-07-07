@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+"""On-screen touchscreen calibration for the Lyra (ili9341 fb + ADS7846).
+
+Draws 5 crosshair targets on /dev/fb0; for each, collects raw samples from
+/dev/input/event0 and takes the median. Fits an affine transform
+raw -> screen by least squares and writes it to /etc/touch-mouse.cal:
+
+  screen_x = a*raw_x + b*raw_y + c
+  screen_y = d*raw_x + e*raw_y + f
+
+The affine fit absorbs axis swap, inversion, scale and offset, so no
+device-tree touchscreen-* flags are needed.
+
+Stop the touch-mouse daemon first (it grabs event0):
+  /etc/init.d/S51touch-mouse stop && touch-cal && /etc/init.d/S51touch-mouse start
+"""
+
+import os
+import struct
+import fcntl
+import select
+import time
+import sys
+
+EVDEV    = '/dev/input/event0'
+FBDEV    = '/dev/fb0'
+CAL_FILE = '/etc/touch-mouse.cal'
+
+EVIOCGRAB = 0x40044590
+EV_SYN, EV_KEY, EV_ABS = 0x00, 0x01, 0x03
+BTN_TOUCH = 0x14a
+
+try:
+    with open('/sys/class/graphics/fb0/virtual_size') as f:
+        W, H = map(int, f.read().split(','))
+except OSError:
+    W, H = 320, 240
+
+INSET = 30
+TARGETS = [(INSET, INSET), (W - 1 - INSET, INSET), (W - 1 - INSET, H - 1 - INSET),
+           (INSET, H - 1 - INSET), (W // 2, H // 2)]
+
+fb = open(FBDEV, 'r+b', buffering=0)
+
+
+def clear(color=0x0000):    
+    row = struct.pack('<H', color) * W
+    fb.seek(0)
+    for _ in range(H):
+        fb.write(row)
+
+
+def cross(cx, cy, color=0xFFFF, r=12):
+    for dx in range(-r, r + 1):
+        x = cx + dx
+        if 0 <= x < W:
+            fb.seek((cy * W + x) * 2)
+            fb.write(struct.pack('<H', color))
+    for dy in range(-r, r + 1):
+        y = cy + dy
+        if 0 <= y < H:
+            fb.seek((y * W + cx) * 2)
+            fb.write(struct.pack('<H', color))
+
+
+def median(vals):
+    s = sorted(vals)
+    return s[len(s) // 2]
+
+
+ev = open(EVDEV, 'rb', buffering=0)
+fcntl.ioctl(ev, EVIOCGRAB, 1)  # sole consumer while calibrating
+
+KEY_ESC = 1
+
+
+def find_event(name):
+    base = '/sys/class/input'
+    try:
+        nodes = sorted(os.listdir(base))
+    except OSError:
+        return None
+    for n in nodes:
+        if not n.startswith('event'):
+            continue
+        try:
+            with open(f'{base}/{n}/device/name') as f:
+                if f.read().strip() == name:
+                    return f'/dev/input/{n}'
+        except OSError:
+            continue
+    return None
+
+
+kb = None
+kb_path = find_event('Lyra UART Keyboard')
+if kb_path:
+    try:
+        kb = open(kb_path, 'rb', buffering=0)
+    except OSError:
+        kb = None
+
+
+def read_touch():
+    """One touch-and-release: skip first 6 reports (settling), median the rest.
+
+    ESC on the keyboard aborts calibration (keeps the previous .cal file)."""
+    xs, ys = [], []
+    x = y = None
+    touching = False
+    skip = 6
+    while True:
+        rl = [ev] + ([kb] if kb else [])
+        r, _, _ = select.select(rl, [], [], 60)
+        if not r:
+            clear()
+            raise SystemExit('touch-cal: timeout waiting for touch')
+        if kb in r:
+            d = kb.read(16)
+            if d and len(d) == 16:
+                _, _, kt, kc, kv = struct.unpack('llHHi', d)
+                if kt == EV_KEY and kc == KEY_ESC and kv == 1:
+                    clear()
+                    raise SystemExit('touch-cal: cancelled (ESC)')
+            if ev not in r:
+                continue
+        data = ev.read(16)
+        if len(data) < 16:
+            continue
+        _, _, t, c, v = struct.unpack('llHHi', data)
+        if t == EV_ABS and c == 0:
+            x = v
+        elif t == EV_ABS and c == 1:
+            y = v
+        elif t == EV_KEY and c == BTN_TOUCH:
+            if v:
+                touching = True
+            elif touching:
+                if len(xs) >= 4:
+                    return (median(xs), median(ys),
+                            max(xs) - min(xs), max(ys) - min(ys))
+                # too short a tap - collect again on the same target
+                xs, ys = [], []
+                touching = False
+                skip = 6
+        elif t == EV_SYN and touching and x is not None and y is not None:
+            if skip > 0:
+                skip -= 1
+            else:
+                xs.append(x)
+                ys.append(y)
+
+
+pts = []
+for i, (tx, ty) in enumerate(TARGETS):
+    clear()
+    cross(tx, ty)
+    rx, ry, spread_x, spread_y = read_touch()
+    print(f'target {i+1}/{len(TARGETS)} screen=({tx},{ty}) raw=({rx},{ry}) '
+          f'spread=({spread_x},{spread_y})', flush=True)
+    pts.append((rx, ry, tx, ty))
+    clear(0x07E0)  # green flash = accepted
+    time.sleep(0.3)
+
+fcntl.ioctl(ev, EVIOCGRAB, 0)
+clear()
+
+
+def solve3(A, B):
+    """Gaussian elimination for the 3x3 normal equations."""
+    M = [row[:] + [B[i]] for i, row in enumerate(A)]
+    for col in range(3):
+        p = max(range(col, 3), key=lambda r: abs(M[r][col]))
+        M[col], M[p] = M[p], M[col]
+        for r in range(3):
+            if r != col and M[col][col]:
+                f = M[r][col] / M[col][col]
+                for k in range(col, 4):
+                    M[r][k] -= f * M[col][k]
+    return [M[i][3] / M[i][i] for i in range(3)]
+
+
+Sxx = sum(p[0] * p[0] for p in pts)
+Sxy = sum(p[0] * p[1] for p in pts)
+Syy = sum(p[1] * p[1] for p in pts)
+Sx  = sum(p[0] for p in pts)
+Sy  = sum(p[1] for p in pts)
+A   = [[Sxx, Sxy, Sx], [Sxy, Syy, Sy], [Sx, Sy, len(pts)]]
+bx  = [sum(p[0] * p[2] for p in pts), sum(p[1] * p[2] for p in pts), sum(p[2] for p in pts)]
+by  = [sum(p[0] * p[3] for p in pts), sum(p[1] * p[3] for p in pts), sum(p[3] for p in pts)]
+a, b, c = solve3(A, bx)
+d, e, f_ = solve3(A, by)
+
+worst = 0.0
+for rx, ry, tx, ty in pts:
+    px = a * rx + b * ry + c
+    py = d * rx + e * ry + f_
+    err = ((px - tx) ** 2 + (py - ty) ** 2) ** 0.5
+    worst = max(worst, err)
+    print(f'  ({tx},{ty}) -> fit ({px:.1f},{py:.1f})  err {err:.1f}px', flush=True)
+
+with open(CAL_FILE, 'w') as fcal:
+    fcal.write(f'{a} {b} {c} {d} {e} {f_}\n')
+print(f'touch-cal: saved {CAL_FILE}; worst residual {worst:.1f}px', flush=True)
+if worst > 15:
+    print('touch-cal: WARNING residual is high - rerun calibration', flush=True)
+    sys.exit(2)
