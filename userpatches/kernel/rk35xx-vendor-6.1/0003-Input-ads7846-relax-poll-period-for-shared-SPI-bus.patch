@@ -1,0 +1,30 @@
+From 5416b7b5420e615e9d2a6a5813ba958c7ef0a83d Mon Sep 17 00:00:00 2001
+From: pepe <jflira@miuandes.cl>
+Date: Tue, 7 Jul 2026 18:58:12 -0400
+Subject: [PATCH 3/3] Input: ads7846 - relax poll period for shared SPI bus
+
+The TSC2046 shares spi0 with the ili9341 display on the Bit0; polling
+at 200 Hz starved the display flush. 50 Hz is plenty for a cursor.
+---
+ drivers/input/touchscreen/ads7846.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/input/touchscreen/ads7846.c b/drivers/input/touchscreen/ads7846.c
+index 1f206c7..36a2d7a 100644
+--- a/drivers/input/touchscreen/ads7846.c
++++ b/drivers/input/touchscreen/ads7846.c
+@@ -57,7 +57,10 @@
+  */
+ 
+ #define TS_POLL_DELAY	1	/* ms delay before the first sample */
+-#define TS_POLL_PERIOD	5	/* ms delay between samples */
++#define TS_POLL_PERIOD	20	/* ms delay between samples (50 Hz). Was 5 (200 Hz):
++				 * this touch shares spi0 with the ili9341 display,
++				 * and 200 Hz polling starved the display flush. A
++				 * cursor needs nowhere near 200 Hz. */
+ 
+ /* this driver doesn't aim at the peak continuous sample rate */
+ #define	SAMPLE_BITS	(8 /*cmd*/ + 16 /*sample*/ + 2 /* before, after */)
+-- 
+2.34.1
+
