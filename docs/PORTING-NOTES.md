@@ -1,0 +1,54 @@
+# Porting notes: Luckfox SDK → Armbian
+
+Where every piece of the bit0 came from, and what changed in the move.
+
+## Framework mapping
+
+| Luckfox Buildroot SDK | bit0-armbian |
+|---|---|
+| private repo-tool workspace (32 GB, `ssh://192.168.10.75`) | `armbian/build` submodule + this repo's `userpatches/` |
+| `kernel-6.1/` (Rockchip BSP 6.1, rkr4.2-era) | `armbian/linux-rockchip` @ `rk-6.1-rkr5.1` (same lineage; the Lyra dtsi is byte-identical) |
+| `buildroot/configs/rockchip_rk3506_luckfox_defconfig` | Debian trixie minimal (`BUILD_MINIMAL=yes`) + `customize-image.sh` |
+| `device/rockchip/` build scripts, `build.sh`, rkflash | `./compile.sh bit0` — output is one flashable SD image |
+| U-Boot `rk3506_luckfox` (Rockchip fork) | mainline-WIP U-Boot (kwiboo's rk3506 branch, pinned by Armbian), `luckfox-lyra-rk3506_defconfig` |
+| `rkbin` blobs from private mirror | same blobs via Armbian's `rkbin-tools` (public `rockchip-linux/rkbin`) |
+
+## Kernel changes (userpatches/kernel/rk35xx-vendor-6.1/)
+
+| SDK change | Armbian equivalent |
+|---|---|
+| edits to `rk3506-luckfox-lyra.dtsi` + `rk3506g-luckfox-lyra-sd.dts` | patch 0001: single new self-contained `rk3506g-luckfox-lyra-sd.dts` (the shared dtsi is untouched, so Lyra Plus / Zero W images are unaffected) |
+| out-of-tree `custom_driver/ili9341_display_driver/ili9341_fb.ko`, insmod'ed by `S09spi-display` | patch 0002: in-tree `drivers/video/fbdev/ili9341_fb.c` (`CONFIG_FB_ILI9341=m`), autoloads via DT compatible `ilitek,ili9341` |
+| `ads7846.c` poll period 5→20 ms | patch 0003, identical |
+| `rk3506_luckfox_defconfig` + `rk3506-display.config` additions | `userpatches/linux-rockchip-vendor.config` (Armbian's config + bit0 block at the end) |
+| in-kernel `lyra_i2c_keyboard.c` (I2C 0x20) | **not ported** — the bit0 uses the UART2 HID bridge |
+
+## Userspace changes (userpatches/overlay/ + customize-image.sh)
+
+| SDK (SysV init, Buildroot) | Armbian (systemd, Debian) |
+|---|---|
+| `S09spi-display` (insmod ili9341_fb.ko) | gone — in-tree module autoloads; also listed in `modules-load.d/bit0.conf` |
+| `S49hidg` (modprobe uinput) | `modules-load.d/bit0.conf` |
+| `S50uart-hid` | `uart-hid-bridge.service` |
+| `S51touch-mouse` | `touch-mouse.service` (`ConditionPathExists=/etc/touch-mouse.cal`) |
+| `S52triggerhappy` | Debian's own `triggerhappy.service`; confs moved to `/etc/triggerhappy/triggers.d/` |
+| `S99bit0-launcher` respawn loop | `bit0-launcher.service` with `Restart=always`; `getty@tty1` disabled (launcher owns tty1; serial getty on ttyFIQ0 remains) |
+| `lyra-volume-handler` Buildroot package | dropped — duplicate of the triggerhappy audio conf |
+| daemons in `/usr/bin` | `/usr/local/bin`; launcher's calibrate flow now uses `systemctl stop/start touch-mouse` |
+| `.directfbrc`, `/root/pico-8/` | not shipped — see `PICO8.md` |
+| `S10firstboot`, inittab tweaks | not needed (systemd; Armbian has its own firstboot) |
+
+## Known risks / first-boot watchlist
+
+- **U-Boot**: `luckfox-lyra-rk3506_defconfig` is validated on the Lyra Plus, not the base Lyra. Watch the serial console (`ttyFIQ0`, 1500000 baud) on first boot.
+- **UART2 tty name**: the bridge expects `/dev/ttyS2`. Same kernel as the SDK so it should hold, but verify with `ls /dev/ttyS*` if the keyboard is dead.
+- **event device numbering**: `touch-mouse` grabs `/dev/input/event0` by default; Debian udev may order devices differently than Buildroot did.
+- **fbcon**: `console=tty1 fbcon=font:VGA8x8` is in the DTS bootargs, but Armbian's boot.cmd/armbianEnv.txt may append its own `console=`. If the LCD console is missing, check `/boot/armbianEnv.txt` (`extraargs=fbcon=map:0 fbcon=font:VGA8x8`).
+- **128 MB RAM**: keep `BUILD_MINIMAL=yes`; think twice before apt-installing anything heavy.
+
+## Not ported (still in the SDK if ever needed)
+
+- `custom_driver/i2c_keyboard/` + `lyra_i2c_keyboard.c` (I2C keyboard path)
+- `ili9488_fb.c` (unused display variant)
+- RetroArch/GBA integration (launcher's GBA menu will report missing BIOS/binary)
+- `fs-overlay/` RkLunch hooks, PulseAudio config
