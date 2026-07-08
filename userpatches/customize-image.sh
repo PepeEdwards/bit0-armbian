@@ -21,6 +21,7 @@ Main() {
 	echo "bit0: installing overlay files" >&2
 	cp -rv /tmp/overlay/usr /
 	cp -rv /tmp/overlay/etc /
+	chmod +x /usr/local/bin/*	# a lost exec bit = 203/EXEC at boot
 
 	# Panel init firmware: explicit install (a bare 'cp -r .../lib /' proved
 	# unreliable with the usrmerge /lib symlink), and fail the build loudly
