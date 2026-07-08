@@ -13,10 +13,12 @@ Main() {
 	apt-get -y -qq update
 	# python3-serial: uart-hid-bridge; kbd: openvt/chvt for the launcher's
 	# TERMINAL entry; triggerhappy: volume/power hotkeys; alsa-utils: amixer;
-	# libssl3t64: libcrypto.so.3 for the transplanted SDK adbd binary.
+	# libssl3t64: libcrypto.so.3 for the transplanted SDK adbd binary;
+	# libsdl2: for PICO-8/retroarch (installed separately, see docs/PICO8.md).
 	# The daemons themselves are stdlib-only Python (raw fb/uinput ioctls).
 	apt-get -y -qq install --no-install-recommends \
-		python3 python3-serial triggerhappy alsa-utils kbd libssl3t64
+		python3 python3-serial triggerhappy alsa-utils kbd libssl3t64 \
+		libsdl2-2.0-0
 
 	echo "bit0: installing overlay files" >&2
 	cp -rv /tmp/overlay/usr /
@@ -38,6 +40,7 @@ Main() {
 	systemctl enable touch-mouse.service
 	systemctl enable bit0-launcher.service
 	systemctl enable triggerhappy.service
+	systemctl enable bit0-alsa-init.service
 
 	# USB gadget: adb only (configfs + the SDK's adbd), like the old image.
 	# 'adb shell' / 'adb push' replace the earlier ttyGS0 serial console.

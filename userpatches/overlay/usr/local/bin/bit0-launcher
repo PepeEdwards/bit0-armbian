@@ -133,6 +133,21 @@ GEAR_ICON = [
     "     ###     ",
 ]
 
+BACK_ICON = [
+    "     #       ",
+    "    ##       ",
+    "   ###       ",
+    "  ####       ",
+    " ############",
+    "#############",
+    "#############",
+    " ############",
+    "  ####       ",
+    "   ###       ",
+    "    ##       ",
+    "     #       ",
+]
+
 
 class Screen:
     def __init__(self):
@@ -592,8 +607,11 @@ def make_pages(scr):
     settings = [slider] + volrow + column_from(scr, [
         ('CALIBRATE', {'app': run_calibrate}),
         ('RESTART', {'cmd': 'sync; reboot', 'msg': 'RESTARTING...'}),
-        ('POWER OFF', {'cmd': 'sync; poweroff', 'msg': 'POWERING OFF'}),
-        ('BACK', {'goto': 'main'})], top=VOLROW_Y + VOLROW_H + 10)
+        ('POWER OFF', {'cmd': 'sync; poweroff', 'msg': 'POWERING OFF'})],
+        top=VOLROW_Y + VOLROW_H + 10)
+    # back arrow top-left (mirrors the gear top-right on the main page)
+    settings.append({'label': '', 'icon': BACK_ICON, 'goto': 'main',
+                     'x': 6, 'y': 6, 'w': 30, 'h': 26})
     return {'main': main, 'settings': settings}
 
 

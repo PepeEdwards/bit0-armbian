@@ -1,0 +1,12 @@
+#!/bin/sh
+# The MAX98357A has no hardware mixer: 'Master' is a softvol control from
+# /etc/asound.conf, and ALSA only creates softvol controls on the FIRST open
+# of the softvol PCM. Until then `amixer set Master` fails silently and the
+# launcher's VOL buttons / triggerhappy volume keys do nothing.
+# Play a short burst of silence through 'default' to instantiate the control,
+# then give it a sane starting level (alsa-restore takes over on later boots).
+if ! amixer get Master >/dev/null 2>&1; then
+	dd if=/dev/zero bs=1536 count=24 2>/dev/null |
+		aplay -q -t raw -f S16_LE -r 48000 -c 2 - 2>/dev/null || true
+	amixer -q set Master 70% 2>/dev/null || true
+fi

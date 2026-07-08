@@ -1,0 +1,12 @@
+[Unit]
+Description=Bit0 ALSA init (instantiate softvol Master control)
+After=sound.target alsa-restore.service
+Before=triggerhappy.service bit0-launcher.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/bit0-alsa-init
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
