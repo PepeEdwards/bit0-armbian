@@ -15,10 +15,14 @@ Main() {
 	# TERMINAL entry; triggerhappy: volume/power hotkeys; alsa-utils: amixer;
 	# libssl3t64: libcrypto.so.3 for the transplanted SDK adbd binary;
 	# libsdl2: for PICO-8/retroarch (installed separately, see docs/PICO8.md).
+	# mesa/EGL/GLES: the RK3506 has no GPU — SDL2's kmsdrm backend cannot
+	# present frames without EGL (verified on hardware: pico-8 ran with audio
+	# but the plane kept scanning fbcon's framebuffer, and its rpi blit path
+	# segfaulted). Mesa's kms_swrast + llvmpipe provide software GL over KMS.
 	# The daemons themselves are stdlib-only Python (raw fb/uinput ioctls).
 	apt-get -y -qq install --no-install-recommends \
 		python3 python3-serial triggerhappy alsa-utils kbd libssl3t64 \
-		libsdl2-2.0-0
+		libsdl2-2.0-0 libgl1-mesa-dri libegl1 libgles2
 
 	echo "bit0: installing overlay files" >&2
 	cp -rv /tmp/overlay/usr /
