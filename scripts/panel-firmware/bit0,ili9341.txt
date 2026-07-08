@@ -1,0 +1,38 @@
+# Init sequence for the Bit0 ILI9341 panel (panel-mipi-dbi firmware source).
+# Compile with: ./mipi-dbi-cmd bit0,ili9341.bin bit0,ili9341.txt
+# Ported 1:1 from the SDK custom driver's ili9341_init_display()
+# (Lyra-sdk/custom_driver/ili9341_display_driver/ili9341_fb.c).
+
+command 0x01                # software reset
+delay 120
+
+command 0x28                # display off
+
+command 0xCB 0x39 0x2C 0x00 0x34 0x02   # power control A
+command 0xCF 0x00 0xC1 0x30              # power control B
+command 0xE8 0x85 0x00 0x78              # driver timing control A
+command 0xEA 0x00 0x00                   # driver timing control B
+command 0xED 0x64 0x03 0x12 0x81         # power on sequence control
+
+command 0x26 0x01                        # gamma set
+# positive gamma correction
+command 0xE0 0x0F 0x31 0x2B 0x0C 0x0E 0x08 0x4E 0xF1 0x37 0x07 0x10 0x03 0x0E 0x09 0x00
+# negative gamma correction
+command 0xE1 0x00 0x0E 0x14 0x03 0x11 0x07 0x31 0xC1 0x48 0x08 0x0F 0x0C 0x31 0x36 0x0F
+
+command 0xC0 0x23                        # power control 1
+command 0xC1 0x10                        # power control 2
+command 0xC5 0x45 0x15                   # VCOM control (contrast)
+command 0xC7 0x90                        # VCOM offset
+
+command 0x3A 0x55                        # pixel format: 16bpp
+command 0xB1 0x00 0x1B                   # frame rate ~79Hz
+command 0x21                             # display inversion ON (panel needs it)
+command 0xB6 0x08 0x82 0x27              # display function control
+command 0x36 0x00                        # MADCTL: portrait, RGB (controller default, explicit)
+
+command 0x11                             # exit sleep
+delay 120
+
+command 0x29                             # display on
+delay 20

@@ -20,6 +20,7 @@ Main() {
 	echo "bit0: installing overlay files" >&2
 	cp -rv /tmp/overlay/usr /
 	cp -rv /tmp/overlay/etc /
+	cp -rv /tmp/overlay/lib /	# /lib/firmware/bit0,ili9341.bin (panel init)
 
 	echo "bit0: enabling services" >&2
 	systemctl enable uart-hid-bridge.service

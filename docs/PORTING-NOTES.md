@@ -18,16 +18,17 @@ Where every piece of the bit0 came from, and what changed in the move.
 | SDK change | Armbian equivalent |
 |---|---|
 | edits to `rk3506-luckfox-lyra.dtsi` + `rk3506g-luckfox-lyra-sd.dts` | patch 0001: single new self-contained `rk3506g-luckfox-lyra-sd.dts` (the shared dtsi is untouched, so Lyra Plus / Zero W images are unaffected) |
-| out-of-tree `custom_driver/ili9341_display_driver/ili9341_fb.ko`, insmod'ed by `S09spi-display` | patch 0002: in-tree `drivers/video/fbdev/ili9341_fb.c` (`CONFIG_FB_ILI9341=m`), autoloads via DT compatible `ilitek,ili9341` |
-| `ads7846.c` poll period 5→20 ms | patch 0003, identical |
+| out-of-tree `custom_driver/ili9341_display_driver/ili9341_fb.ko`, insmod'ed by `S09spi-display` | **no driver code at all** — mainline `panel-mipi-dbi` DRM driver (`CONFIG_DRM_PANEL_MIPI_DBI=m`); the panel init sequence lives in `/lib/firmware/bit0,ili9341.bin`, source + compiler in `scripts/panel-firmware/`. fbcon/`/dev/fb0` via DRM fbdev emulation. Backlight GPIO became a standard `gpio-backlight` node. |
+| `ads7846.c` poll period 5→20 ms | patch 0002, identical |
 | `rk3506_luckfox_defconfig` + `rk3506-display.config` additions | `userpatches/linux-rockchip-vendor.config` (Armbian's config + bit0 block at the end) |
 | in-kernel `lyra_i2c_keyboard.c` (I2C 0x20) | **not ported** — the bit0 uses the UART2 HID bridge |
+| kernel-embedded splash (`splash_data.h`) | **dropped** — the launcher draws its own splash a few seconds later; add an early fb-blit service if boot-time splash is wanted |
 
 ## Userspace changes (userpatches/overlay/ + customize-image.sh)
 
 | SDK (SysV init, Buildroot) | Armbian (systemd, Debian) |
 |---|---|
-| `S09spi-display` (insmod ili9341_fb.ko) | gone — in-tree module autoloads; also listed in `modules-load.d/bit0.conf` |
+| `S09spi-display` (insmod ili9341_fb.ko) | gone — `panel_mipi_dbi` autoloads via DT; also listed in `modules-load.d/bit0.conf` |
 | `S49hidg` (modprobe uinput) | `modules-load.d/bit0.conf` |
 | `S50uart-hid` | `uart-hid-bridge.service` |
 | `S51touch-mouse` | `touch-mouse.service` (`ConditionPathExists=/etc/touch-mouse.cal`) |
@@ -44,6 +45,8 @@ Where every piece of the bit0 came from, and what changed in the move.
 - **UART2 tty name**: the bridge expects `/dev/ttyS2`. Same kernel as the SDK so it should hold, but verify with `ls /dev/ttyS*` if the keyboard is dead.
 - **event device numbering**: `touch-mouse` grabs `/dev/input/event0` by default; Debian udev may order devices differently than Buildroot did.
 - **fbcon**: `console=tty1 fbcon=font:VGA8x8` is in the DTS bootargs, but Armbian's boot.cmd/armbianEnv.txt may append its own `console=`. If the LCD console is missing, check `/boot/armbianEnv.txt` (`extraargs=fbcon=map:0 fbcon=font:VGA8x8`).
+- **Display flush rate**: the old driver throttled to 30 fps and tracked dirty lines; DRM flushes damage rects on demand instead. If touch feels starved under heavy screen updates, that's the shared-SPI contention to revisit (the ads7846 20 ms patch is the main mitigation).
+- **Panel init**: if colors/orientation are off, edit `scripts/panel-firmware/bit0,ili9341.txt` (e.g. MADCTL `0x36`, inversion `0x20/0x21`), recompile with `mipi-dbi-cmd`, and replace `/lib/firmware/bit0,ili9341.bin` — no kernel rebuild needed.
 - **128 MB RAM**: keep `BUILD_MINIMAL=yes`; think twice before apt-installing anything heavy.
 
 ## Not ported (still in the SDK if ever needed)

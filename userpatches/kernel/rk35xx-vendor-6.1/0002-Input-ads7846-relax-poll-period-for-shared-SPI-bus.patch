@@ -1,9 +1,9 @@
-From 5416b7b5420e615e9d2a6a5813ba958c7ef0a83d Mon Sep 17 00:00:00 2001
+From 748b01ad77cdbf9cbd5ca39150c839fc5ded98cb Mon Sep 17 00:00:00 2001
 From: pepe <jflira@miuandes.cl>
-Date: Tue, 7 Jul 2026 18:58:12 -0400
-Subject: [PATCH 3/3] Input: ads7846 - relax poll period for shared SPI bus
+Date: Tue, 7 Jul 2026 20:02:51 -0400
+Subject: [PATCH 2/2] Input: ads7846 - relax poll period for shared SPI bus
 
-The TSC2046 shares spi0 with the ili9341 display on the Bit0; polling
+The TSC2046 shares spi0 with the ILI9341 display on the Bit0; polling
 at 200 Hz starved the display flush. 50 Hz is plenty for a cursor.
 ---
  drivers/input/touchscreen/ads7846.c | 5 ++++-

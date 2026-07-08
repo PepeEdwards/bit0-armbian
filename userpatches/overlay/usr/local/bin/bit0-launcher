@@ -335,7 +335,7 @@ def run_pico8_cart(cart):
                      '-windowed', '0', '-width', '256', '-height', '320',
                      '-pixel_perfect', '0', '-run', cart],
                     env=dict(os.environ, HOME='/root',
-                             SDL_VIDEODRIVER='directfb', SDL_AUDIODRIVER='alsa'))
+                             SDL_VIDEODRIVER='kmsdrm', SDL_AUDIODRIVER='alsa'))
 
 
 def run_sdcard(scr):
@@ -427,7 +427,7 @@ def run_gba(rom):
     # key bindings live in /root/.config/retroarch/retroarch.cfg
     subprocess.call([RETROARCH, '-L', GBA_CORE, rom],
                     env=dict(os.environ, HOME='/root',
-                             SDL_VIDEODRIVER='directfb',
+                             SDL_VIDEODRIVER='kmsdrm',
                              SDL_AUDIODRIVER='alsa'))
 
 

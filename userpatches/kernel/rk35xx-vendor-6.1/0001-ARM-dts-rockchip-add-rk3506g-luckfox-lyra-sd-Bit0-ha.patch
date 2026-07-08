@@ -1,17 +1,18 @@
-From 39242f8accc55edd77a48035786540bd8fc4855b Mon Sep 17 00:00:00 2001
+From 781b31667787045bc5ec194824d253a3275dfc94 Mon Sep 17 00:00:00 2001
 From: pepe <jflira@miuandes.cl>
-Date: Tue, 7 Jul 2026 18:56:26 -0400
-Subject: [PATCH 1/3] ARM: dts: rockchip: add rk3506g-luckfox-lyra-sd (Bit0
+Date: Tue, 7 Jul 2026 20:02:41 -0400
+Subject: [PATCH 1/2] ARM: dts: rockchip: add rk3506g-luckfox-lyra-sd (Bit0
  handheld)
 
 Base Luckfox Lyra board booting from SD, configured as the Bit0
-handheld: ILI9341 SPI display, TSC2046 touch and SD-over-SPI sharing
-SPI0, MAX98357A on SAI0, QMK keyboard bridge on UART2. Stock DSI panel
-and its I2C touch controllers are disabled.
+handheld: ILI9341 SPI display via the mainline panel-mipi-dbi driver
+(init sequence in firmware file bit0,ili9341.bin), TSC2046 touch and
+SD-over-SPI sharing SPI0, MAX98357A on SAI0, QMK keyboard bridge on
+UART2. Stock DSI panel and its I2C touch controllers are disabled.
 ---
  arch/arm/boot/dts/Makefile                    |   1 +
- arch/arm/boot/dts/rk3506g-luckfox-lyra-sd.dts | 221 ++++++++++++++++++
- 2 files changed, 222 insertions(+)
+ arch/arm/boot/dts/rk3506g-luckfox-lyra-sd.dts | 243 ++++++++++++++++++
+ 2 files changed, 244 insertions(+)
  create mode 100644 arch/arm/boot/dts/rk3506g-luckfox-lyra-sd.dts
 
 diff --git a/arch/arm/boot/dts/Makefile b/arch/arm/boot/dts/Makefile
@@ -28,16 +29,17 @@ index ffd7467..f717125 100644
  	rk3506g-test1-v10-audio.dtb \
 diff --git a/arch/arm/boot/dts/rk3506g-luckfox-lyra-sd.dts b/arch/arm/boot/dts/rk3506g-luckfox-lyra-sd.dts
 new file mode 100644
-index 0000000..7f59f94
+index 0000000..6acd33e
 --- /dev/null
 +++ b/arch/arm/boot/dts/rk3506g-luckfox-lyra-sd.dts
-@@ -0,0 +1,221 @@
+@@ -0,0 +1,243 @@
 +// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
 +/*
 + * Copyright (c) 2024 Rockchip Electronics Co., Ltd.
 + *
 + * Luckfox Lyra (base board, SD boot) — Bit0 handheld configuration:
-+ * ILI9341 SPI display + TSC2046 touch + SD-over-SPI on a shared SPI0 bus,
++ * ILI9341 SPI display (panel-mipi-dbi, init sequence in firmware file
++ * bit0,ili9341.bin) + TSC2046 touch + SD-over-SPI on a shared SPI0 bus,
 + * MAX98357A speaker amp on SAI0, QMK keyboard bridge on UART2.
 + * The stock MIPI-DSI panel and its I2C touch controllers are disabled.
 + */
@@ -52,6 +54,12 @@ index 0000000..7f59f94
 +
 +	chosen {
 +		bootargs = "earlycon=uart8250,mmio32,0xff0a0000 console=tty1 console=tty2 console=ttyFIQ0 fbcon=font:VGA8x8 storagemedia=sd root=/dev/mmcblk0p3 rootfstype=ext4 rootwait snd_aloop.index=7 snd_aloop.use_raw_jiffies=1";
++	};
++
++	backlight: backlight {
++		compatible = "gpio-backlight";
++		gpios = <&gpio1 RK_PB2 GPIO_ACTIVE_HIGH>;	/* rm_io15 */
++		default-on;
 +	};
 +
 +	max98357a: max98357a-codec {
@@ -114,26 +122,41 @@ index 0000000..7f59f94
 +	status = "okay";
 +	pinctrl-names = "default";
 +	pinctrl-0 = <&rm_io29_spi0_clk &rm_io28_spi0_mosi &rm_io31_spi0_miso>;
-+	cs-gpios = <&gpio1 RK_PD2 GPIO_ACTIVE_LOW>,	/* ili9341 CS - rm_io30 */
++	cs-gpios = <&gpio1 RK_PD2 GPIO_ACTIVE_LOW>,	/* display CS - rm_io30 */
 +		   <&gpio0 RK_PB5 GPIO_ACTIVE_LOW>,	/* touch CS - GPIO0_B5 */
 +		   <&gpio0 RK_PA2 GPIO_ACTIVE_LOW>;	/* SD card CS - GPIO0_A2 */
 +
-+	ili9341: ili9341@0 {
-+		status = "okay";
-+		compatible = "ilitek,ili9341";
++	display: display@0 {
++		/*
++		 * Mainline generic MIPI-DBI panel driver. The controller init
++		 * sequence (gamma, VCOM, 16bpp pixel format, inversion ON)
++		 * comes from /lib/firmware/bit0,ili9341.bin — see
++		 * scripts/panel-firmware/ in the bit0-armbian repo.
++		 */
++		compatible = "bit0,ili9341", "panel-mipi-dbi-spi";
 +		reg = <0>;
-+		invert-colors;
 +		pinctrl-names = "default";
 +		pinctrl-0 = <&ili9341_pins>;
 +		spi-max-frequency = <80000000>;
-+		fps = <30>;	/* was 40; 30 frees ~25% of the shared SPI bus and
-+				 * PICO-8/most carts render at ~30fps anyway */
-+		buswidth = <8>;
-+		rst-gpios = <&gpio1 RK_PB3 GPIO_ACTIVE_HIGH>;		/* rm_io26 */
-+		dc-gpios = <&gpio1 RK_PC2 GPIO_ACTIVE_HIGH>;		/* rm_io27 */
-+		backlight-gpios = <&gpio1 RK_PB2 GPIO_ACTIVE_HIGH>;	/* rm_io15 */
-+		width = <240>;
-+		height = <320>;
++		dc-gpios = <&gpio1 RK_PC2 GPIO_ACTIVE_HIGH>;	/* rm_io27 */
++		reset-gpios = <&gpio1 RK_PB3 GPIO_ACTIVE_HIGH>;	/* rm_io26 */
++		backlight = <&backlight>;
++
++		/* 2.8" module glass; only affects reported DPI */
++		width-mm = <43>;
++		height-mm = <58>;
++
++		panel-timing {
++			hactive = <240>;
++			vactive = <320>;
++			hback-porch = <0>;
++			vback-porch = <0>;
++			clock-frequency = <0>;
++			hfront-porch = <0>;
++			hsync-len = <0>;
++			vfront-porch = <0>;
++			vsync-len = <0>;
++		};
 +	};
 +
 +	touch: touch@1 {

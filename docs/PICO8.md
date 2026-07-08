@@ -23,53 +23,37 @@ Config that worked on the SDK build (window 256x320, fullscreen, ALSA audio)
 is preserved in the old overlay: `Lyra-sdk/buildroot/board/rockchip/rk3506/
 spi-display-overlay/root/pico-8/{config.txt,pico-8.sh}` — copy both.
 
-## 2. The video backend problem
+## 2. Video backend: kmsdrm (already solved by the image)
 
-`pico8_dyn` renders through SDL2. On the SDK image it used
-`SDL_VIDEODRIVER=directfb` with a `/root/.directfbrc` (fbdev system, cursor
-off, input restricted to the Lyra uinput devices). **Debian's SDL2 has no
-DirectFB backend** (DirectFB was dropped from Debian), and SDL2 has no fbdev
-backend either, so the SDK launch script does not work as-is.
+`pico8_dyn` renders through SDL2. On the SDK image it needed
+`SDL_VIDEODRIVER=directfb` plus a hand-built DirectFB stack, because the
+display was a plain fbdev device. **This image drives the panel with the
+mainline DRM driver (`panel-mipi-dbi`)**, so there is a real DRM device and
+stock Debian SDL2 works directly:
 
-Options, best first:
+```sh
+apt-get install libsdl2-2.0-0
+```
 
-### Option A — switch the display to the mainline DRM driver (recommended)
+and in `/root/pico-8/pico-8.sh` replace the old environment with:
 
-The kernel has a mainline **tinydrm** driver for this panel
-(`drivers/gpu/drm/tiny/ili9341.c`, same `ilitek,ili9341` compatible). Using it
-instead of our fbdev driver gives a real DRM device, and stock Debian SDL2
-works out of the box with `SDL_VIDEODRIVER=kmsdrm`. fbcon still works through
-the DRM fbdev emulation.
+```sh
+export SDL_VIDEODRIVER=kmsdrm
+export SDL_AUDIODRIVER=alsa
+~/pico-8/pico8_dyn -home /root/pico-8 -windowed 0 -width 240 -height 320 -pixel_perfect 0
+```
 
-- kernel config: `CONFIG_DRM_ILI9341=m` (and drop `CONFIG_FB_ILI9341`)
-- DTS: the node needs the mainline binding properties (`dc-gpios`,
-  `reset-gpios`, `backlight` phandle) — small patch to
-  `rk3506g-luckfox-lyra-sd.dts`
-- lose: the custom driver's splash screen and dirty-line tuning;
-  verify SPI throughput is acceptable at 80 MHz
-
-### Option B — build DirectFB yourself (replicates the SDK exactly)
-
-Compile legacy DirectFB 1.7.7 + SDL2 with `--enable-video-directfb` on the
-device (or cross-compile), install to `/usr/local`, copy the SDK's
-`/root/.directfbrc`. Heavyweight and unmaintained, but known-good on this
-exact hardware.
-
-### Option C — statically-bundled SDL
-
-Build SDL2 with the legacy fbdev patchset, or run the pico8 static binary
-against SDL1.2-compat. Fragile; last resort.
+No DirectFB, no `.directfbrc`. Note: stop the launcher first if testing by
+hand (`systemctl stop bit0-launcher`) — only one DRM master at a time.
 
 ## 3. Audio and input
 
 - Audio: `SDL_AUDIODRIVER=alsa` works unchanged (MAX98357A via asound.conf
   dmix/softvol).
 - Input: the uinput devices from uart-hid-bridge/touch-mouse appear as normal
-  evdev keyboards/mice; SDL2 kmsdrm reads them directly. The `.directfbrc`
-  input restrictions are only needed with Option B.
+  evdev keyboards/mice; SDL2 kmsdrm reads them directly.
 
 ## 4. Wire into the launcher
 
-Nothing to do — once `/root/pico-8/pico-8.sh` exists the PICO-8 menu entry
-launches it. Update `pico-8.sh`'s `SDL_VIDEODRIVER` to match the option you
-chose (`kmsdrm` for Option A).
+Nothing else to do — once `/root/pico-8/pico-8.sh` exists the PICO-8 menu
+entry launches it.

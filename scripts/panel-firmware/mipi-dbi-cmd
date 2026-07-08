@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+# Compile a panel-mipi-dbi firmware file from a command listing.
+# Same format as notro's mipi-dbi-cmd (github.com/notro/panel-mipi-dbi):
+#   15-byte magic "MIPI DBI" + NULs, 1-byte format version (1), then a
+#   byte stream of: command, num_parameters, parameters...
+#   A delay is encoded as NOP (0x00) with one parameter (milliseconds).
+#
+# Usage: mipi-dbi-cmd <out.bin> <in.txt>
+
+import sys
+
+
+def main():
+    if len(sys.argv) != 3:
+        sys.exit(__doc__ or 'usage: mipi-dbi-cmd <out.bin> <in.txt>')
+    out_fn, in_fn = sys.argv[1], sys.argv[2]
+
+    buf = bytearray(b'MIPI DBI' + b'\x00' * 7)  # magic, 15 bytes
+    buf.append(1)                               # file format version
+
+    with open(in_fn) as f:
+        for lineno, line in enumerate(f, 1):
+            line = line.split('#', 1)[0].strip()
+            if not line:
+                continue
+            words = line.split()
+            kind, args = words[0], words[1:]
+            if kind == 'command':
+                vals = [int(w, 0) for w in args]
+                if not vals:
+                    sys.exit(f'{in_fn}:{lineno}: command needs an opcode')
+                if any(not 0 <= v <= 255 for v in vals):
+                    sys.exit(f'{in_fn}:{lineno}: byte out of range')
+                if vals[0] == 0x00:
+                    sys.exit(f'{in_fn}:{lineno}: NOP (0x00) is reserved for delays')
+                buf.append(vals[0])
+                buf.append(len(vals) - 1)
+                buf.extend(vals[1:])
+            elif kind == 'delay':
+                ms = int(args[0], 0)
+                if not 0 <= ms <= 255:
+                    sys.exit(f'{in_fn}:{lineno}: delay must be 0-255 ms')
+                buf.extend((0x00, 0x01, ms))
+            else:
+                sys.exit(f'{in_fn}:{lineno}: unknown keyword {kind!r}')
+
+    with open(out_fn, 'wb') as f:
+        f.write(buf)
+    print(f'{out_fn}: {len(buf)} bytes')
+
+
+if __name__ == '__main__':
+    main()
