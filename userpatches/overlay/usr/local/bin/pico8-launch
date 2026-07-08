@@ -1,0 +1,24 @@
+#!/bin/sh
+# Launch PICO-8 on the Bit0. Ships in the image; the only thing the user
+# provides is the proprietary /root/pico-8/ directory (pico8_dyn + pico8.dat).
+# Extra arguments are passed through (e.g. -run /path/to/cart.p8).
+#
+# Why this exact incantation (see docs/PICO8.md for the full story):
+# - kmsdrm + Mesa kms_swrast/llvmpipe: RK3506 has no GPU; LIBGL_ALWAYS_SOFTWARE
+#   picks the CPU renderer deterministically.
+# - SDL_RENDER_DRIVER=opengles2 + -pixel_perfect 1: the ONLY working path.
+#   pixel_perfect 0 switches pico-8 to its Raspberry-Pi blitter, which calls
+#   desktop-GL functions (glEnable(GL_TEXTURE_2D), glTexImage2D(GL_BGRA))
+#   that Mesa's strict GLES2 rejects -> black screen.
+# - pico8-stretch.so: pixel_perfect 1 integer-scales to 1x (128x128) on a
+#   240px panel; the shim rewrites the back-page SDL_RenderCopy dest rect.
+#   Geometry via PICO8_DRAW_RECT "x,y,w,h"; default 40,0,240,240 (square,
+#   centered). Use 0,0,320,240 for full-stretch.
+export SDL_VIDEODRIVER=kmsdrm
+export SDL_AUDIODRIVER=alsa
+export SDL_RENDER_DRIVER=opengles2
+export LIBGL_ALWAYS_SOFTWARE=1
+export LD_PRELOAD=/usr/local/lib/pico8-stretch.so
+export PICO8_DRAW_RECT="${PICO8_DRAW_RECT:-40,0,240,240}"
+
+exec /root/pico-8/pico8_dyn -home /root/pico-8 -windowed 0 -pixel_perfect 1 "$@"

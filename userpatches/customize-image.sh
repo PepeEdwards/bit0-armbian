@@ -32,10 +32,12 @@ Main() {
 	# PICO-8 is proprietary and gitignored: it ships in the image only when
 	# the builder has placed a licensed copy at overlay/root/pico-8/
 	# (see docs/PICO8.md). Otherwise install later via install-pico8.sh.
+	# All launch logic is in the image regardless (pico8-launch + the
+	# pico8-stretch.so shim).
 	if [ -f /tmp/overlay/root/pico-8/pico8_dyn ]; then
 		echo "bit0: installing local pico-8 copy" >&2
 		cp -r /tmp/overlay/root /
-		chmod +x /root/pico-8/pico8_dyn /root/pico-8/pico-8.sh
+		chmod +x /root/pico-8/pico8_dyn
 	else
 		echo "bit0: no pico-8 in overlay, skipping (docs/PICO8.md)" >&2
 	fi

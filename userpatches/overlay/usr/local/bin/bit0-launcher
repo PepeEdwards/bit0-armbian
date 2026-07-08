@@ -341,25 +341,22 @@ def _kill_stale(*names):
 
 def run_pico8(scr=None):
     # pico-8 is proprietary and only present if it was in the build overlay
-    # or pushed with install-pico8.sh; see docs/PICO8.md. Check the binary,
-    # not the launch script (the script alone doesn't make it runnable).
+    # or pushed with install-pico8.sh; see docs/PICO8.md. All launch logic
+    # (env, GL workarounds, stretch shim) lives in /usr/local/bin/pico8-launch.
     if not os.path.exists('/root/pico-8/pico8_dyn'):
         if scr:
             fullscreen_message(scr, 'PICO-8 NOT INSTALLED')
             time.sleep(2.5)
         return
     _kill_stale('pico8_dyn')
-    subprocess.call(['/bin/sh', '/root/pico-8/pico-8.sh'],
+    subprocess.call(['/usr/local/bin/pico8-launch'],
                     env=dict(os.environ, HOME='/root'))
 
 
 def run_pico8_cart(cart):
     _kill_stale('pico8_dyn')
-    subprocess.call(['/root/pico-8/pico8_dyn', '-home', '/root/pico-8',
-                     '-windowed', '0', '-width', '256', '-height', '320',
-                     '-pixel_perfect', '0', '-run', cart],
-                    env=dict(os.environ, HOME='/root',
-                             SDL_VIDEODRIVER='kmsdrm', SDL_AUDIODRIVER='alsa'))
+    subprocess.call(['/usr/local/bin/pico8-launch', '-run', cart],
+                    env=dict(os.environ, HOME='/root'))
 
 
 def run_sdcard(scr):
