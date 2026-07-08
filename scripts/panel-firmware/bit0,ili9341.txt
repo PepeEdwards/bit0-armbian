@@ -29,7 +29,9 @@ command 0x3A 0x55                        # pixel format: 16bpp
 command 0xB1 0x00 0x1B                   # frame rate ~79Hz
 command 0x21                             # display inversion ON (panel needs it)
 command 0xB6 0x08 0x82 0x27              # display function control
-command 0x36 0x00                        # MADCTL: portrait, RGB (controller default, explicit)
+# MADCTL 0xE8 = MY|MX|MV|BGR: the old driver ran hardcoded rotate=270 with
+# BGR order — the panel is mounted landscape (320x240) in the Bit0.
+command 0x36 0xE8
 
 command 0x11                             # exit sleep
 delay 120

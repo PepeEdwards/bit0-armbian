@@ -1,6 +1,6 @@
-From 70c7b046ecb3e270c0f471307b55127c2bc78f6b Mon Sep 17 00:00:00 2001
+From 876d020442a2ac023175b4bca9873f113b2164c4 Mon Sep 17 00:00:00 2001
 From: pepe <jflira@miuandes.cl>
-Date: Wed, 8 Jul 2026 00:24:02 -0400
+Date: Wed, 8 Jul 2026 00:35:50 -0400
 Subject: [PATCH 2/2] Input: ads7846 - relax poll period for shared SPI bus
 
 The TSC2046 shares spi0 with the ILI9341 display on the Bit0; polling
