@@ -31,10 +31,14 @@ cd bit0-armbian
 ./scripts/build.sh
 ```
 
-The finished SD card image lands in `build/output/images/` (and is copied to
-`/mnt/c/Users/jflir/bit0/` when running under WSL). Flash it with balenaEtcher
-or Rufus — the image contains the full GPT layout including U-Boot, no extra
-flashing tools required. Serial console for debugging: `ttyFIQ0` @ 1500000.
+The finished SD card image lands in `build/output/images/`. Flash it with
+balenaEtcher or Rufus — the image contains the full GPT layout including
+U-Boot, no extra flashing tools required. On WSL, copy the image to the
+Windows side first if you flash from there. Serial console for debugging:
+`ttyFIQ0` @ 1500000.
+
+Note: always clone/build on the Linux filesystem (`~`), never under `/mnt/c` —
+the rootfs build needs real ext4 semantics and 9P is painfully slow.
 
 ## Origin
 
