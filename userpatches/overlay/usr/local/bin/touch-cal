@@ -108,7 +108,7 @@ def read_touch():
     xs, ys = [], []
     x = y = None
     touching = False
-    skip = 6
+    skip = 2   # was 6: at the 20ms poll period that demanded a long hold
     while True:
         rl = [ev] + ([kb] if kb else [])
         r, _, _ = select.select(rl, [], [], 60)
@@ -136,13 +136,13 @@ def read_touch():
             if v:
                 touching = True
             elif touching:
-                if len(xs) >= 4:
+                if len(xs) >= 3:   # was 4, see skip above
                     return (median(xs), median(ys),
                             max(xs) - min(xs), max(ys) - min(ys))
                 # too short a tap - collect again on the same target
                 xs, ys = [], []
                 touching = False
-                skip = 6
+                skip = 2
         elif t == EV_SYN and touching and x is not None and y is not None:
             if skip > 0:
                 skip -= 1
