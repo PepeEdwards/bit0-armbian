@@ -340,9 +340,10 @@ def _kill_stale(*names):
 
 
 def run_pico8(scr=None):
-    # pico-8 is proprietary and not shipped in the image; see docs/PICO8.md
-    # in the bit0-armbian repo for how to install it.
-    if not os.path.exists('/root/pico-8/pico-8.sh'):
+    # pico-8 is proprietary and only present if it was in the build overlay
+    # or pushed with install-pico8.sh; see docs/PICO8.md. Check the binary,
+    # not the launch script (the script alone doesn't make it runnable).
+    if not os.path.exists('/root/pico-8/pico8_dyn'):
         if scr:
             fullscreen_message(scr, 'PICO-8 NOT INSTALLED')
             time.sleep(2.5)

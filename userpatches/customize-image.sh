@@ -25,6 +25,17 @@ Main() {
 	cp -rv /tmp/overlay/etc /
 	chmod +x /usr/local/bin/*	# a lost exec bit = 203/EXEC at boot
 
+	# PICO-8 is proprietary and gitignored: it ships in the image only when
+	# the builder has placed a licensed copy at overlay/root/pico-8/
+	# (see docs/PICO8.md). Otherwise install later via install-pico8.sh.
+	if [ -f /tmp/overlay/root/pico-8/pico8_dyn ]; then
+		echo "bit0: installing local pico-8 copy" >&2
+		cp -r /tmp/overlay/root /
+		chmod +x /root/pico-8/pico8_dyn /root/pico-8/pico-8.sh
+	else
+		echo "bit0: no pico-8 in overlay, skipping (docs/PICO8.md)" >&2
+	fi
+
 	# Panel init firmware: explicit install (a bare 'cp -r .../lib /' proved
 	# unreliable with the usrmerge /lib symlink), and fail the build loudly
 	# if it's missing — without it the display driver cannot start.

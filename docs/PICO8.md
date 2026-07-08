@@ -1,30 +1,38 @@
-# Installing PICO-8 on the Bit0 (Armbian)
+# PICO-8 on the Bit0 (Armbian)
 
-PICO-8 is proprietary and is **deliberately not in this repository** — do not
-commit `pico8_dyn` / `pico8.dat` here. The launcher's PICO-8 button shows
-`PICO-8 NOT INSTALLED` until the files exist on the device.
+PICO-8 is proprietary (lexaloffle.com) and is **never committed to this
+repository** — `userpatches/overlay/root/pico-8/` is gitignored. There are two
+ways to get it onto the device; both use the same paths as the old Buildroot
+image (`/root/pico-8/...`).
 
-## Install (one command, over adb)
+The image ships `libSDL2` (customize-image.sh), and the display is a DRM
+device, so stock SDL2 renders via **kmsdrm** — no DirectFB, unlike the old
+Buildroot image. The only file that differs from the old overlay is
+`pico-8.sh` (same path; kmsdrm environment). Its canonical copy is tracked at
+`scripts/pico-8.sh`.
 
-The image already ships `libSDL2` (customize-image.sh), and the display is a
-DRM device, so stock SDL2 renders via **kmsdrm** — no DirectFB, unlike the old
-Buildroot image.
+## Option A — bake it into the image (build-time)
 
-With the device connected over USB (adb):
+Before building, place your licensed Raspberry Pi build (needs `pico8_dyn`
+and `pico8.dat`; carts/config.txt welcome) at:
 
-```bash
-./scripts/install-pico8.sh /path/to/unpacked/pico-8
+```
+userpatches/overlay/root/pico-8/
 ```
 
-The source dir must contain `pico8_dyn` and `pico8.dat` from the
-**Raspberry Pi** build (lexaloffle.com). With no argument the script uses the
-copy in the old Luckfox SDK overlay
-(`Lyra-sdk/buildroot/board/rockchip/rk3506/spi-display-overlay/root/pico-8/`),
-including your carts and tuned `config.txt`.
+and put `scripts/pico-8.sh` in there as `pico-8.sh`. customize-image.sh
+detects it and ships it; if the directory is absent it just logs and skips —
+fresh clones still build fine, the launcher shows PICO-8 NOT INSTALLED.
 
-The script pushes everything to `/root/pico-8/`, installs the kmsdrm launch
-script (`scripts/pico-8.sh` → `/root/pico-8/pico-8.sh`) and sets permissions.
-The launcher picks it up immediately — no reboot.
+## Option B — push to a running device over adb (no rebuild)
+
+```bash
+./scripts/install-pico8.sh [/path/to/pico-8]
+```
+
+Pushes the directory (default: the copy in the old Luckfox SDK overlay,
+including carts and config.txt) to `/root/pico-8/` together with the kmsdrm
+launch script. The launcher picks it up immediately — no reboot.
 
 ## How it runs
 
