@@ -1,0 +1,47 @@
+#!/bin/bash
+# Bit0 USB gadget: ADB over the OTG port, like the Luckfox SDK image.
+# configfs composite gadget with a single functionfs function running the
+# Rockchip/Buildroot adbd binary (glibc armhf, transplanted from the SDK).
+set -e
+
+G=/sys/kernel/config/usb_gadget/bit0
+
+modprobe libcomposite
+modprobe usb_f_fs
+
+mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config
+
+if [ ! -d "$G" ]; then
+	mkdir -p "$G"
+	cd "$G"
+	echo 0x2207 > idVendor		# Rockchip: Windows adb driver already matches
+	echo 0x0006 > idProduct		# same IDs as the SDK adb gadget
+	echo 0x0310 > bcdDevice
+	echo 0x0200 > bcdUSB
+	mkdir -p strings/0x409
+	echo "Bit0"          > strings/0x409/manufacturer
+	echo "Bit0 Handheld" > strings/0x409/product
+	echo "bit0-0001"     > strings/0x409/serialnumber
+	mkdir -p configs/b.1/strings/0x409
+	echo "adb" > configs/b.1/strings/0x409/configuration
+	echo 500   > configs/b.1/MaxPower
+	mkdir -p functions/ffs.adb
+	ln -sf "$G/functions/ffs.adb" configs/b.1/
+fi
+
+mkdir -p /dev/usb-ffs/adb
+mountpoint -q /dev/usb-ffs/adb || mount -t functionfs adb /dev/usb-ffs/adb
+
+/usr/local/bin/adbd &
+ADBD=$!
+
+# adbd writes its descriptors to ep0; the data endpoints appear when ready.
+# Only then may the UDC be bound, or enumeration races and fails.
+for _ in $(seq 1 50); do
+	[ -e /dev/usb-ffs/adb/ep1 ] && break
+	sleep 0.1
+done
+
+ls /sys/class/udc | head -1 > "$G/UDC"
+
+wait "$ADBD"

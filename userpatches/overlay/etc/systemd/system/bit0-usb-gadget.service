@@ -1,0 +1,12 @@
+[Unit]
+Description=Bit0 USB gadget (adb over OTG, configfs + adbd)
+After=systemd-modules-load.service sys-kernel-config.mount
+
+[Service]
+ExecStart=/usr/local/bin/bit0-usb-gadget
+Restart=on-failure
+RestartSec=2
+ExecStopPost=/bin/sh -c 'echo "" > /sys/kernel/config/usb_gadget/bit0/UDC 2>/dev/null || true'
+
+[Install]
+WantedBy=multi-user.target

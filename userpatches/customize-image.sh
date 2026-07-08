@@ -12,10 +12,11 @@ Main() {
 	echo "bit0: installing packages" >&2
 	apt-get -y -qq update
 	# python3-serial: uart-hid-bridge; kbd: openvt/chvt for the launcher's
-	# TERMINAL entry; triggerhappy: volume/power hotkeys; alsa-utils: amixer.
+	# TERMINAL entry; triggerhappy: volume/power hotkeys; alsa-utils: amixer;
+	# libssl3t64: libcrypto.so.3 for the transplanted SDK adbd binary.
 	# The daemons themselves are stdlib-only Python (raw fb/uinput ioctls).
 	apt-get -y -qq install --no-install-recommends \
-		python3 python3-serial triggerhappy alsa-utils kbd
+		python3 python3-serial triggerhappy alsa-utils kbd libssl3t64
 
 	echo "bit0: installing overlay files" >&2
 	cp -rv /tmp/overlay/usr /
@@ -37,9 +38,9 @@ Main() {
 	systemctl enable bit0-launcher.service
 	systemctl enable triggerhappy.service
 
-	# Login console on the USB gadget serial port (g_serial -> ttyGS0).
-	# Plug the Lyra's USB into a PC and it appears as a COM port.
-	systemctl enable serial-getty@ttyGS0.service
+	# USB gadget: adb only (configfs + the SDK's adbd), like the old image.
+	# 'adb shell' / 'adb push' replace the earlier ttyGS0 serial console.
+	systemctl enable bit0-usb-gadget.service
 
 	# The launcher owns tty1; keep a getty only on the serial console.
 	systemctl disable getty@tty1.service
