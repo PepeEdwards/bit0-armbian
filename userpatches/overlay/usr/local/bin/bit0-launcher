@@ -79,6 +79,8 @@ FONT = {
     '0': [" ### ", "#   #", "#  ##", "# # #", "##  #", "#   #", " ### "],
     '8': [" ### ", "#   #", "#   #", " ### ", "#   #", "#   #", " ### "],
     '-': ["     ", "     ", "     ", "#####", "     ", "     ", "     "],
+    '+': ["     ", "  #  ", "  #  ", "#####", "  #  ", "  #  ", "     "],
+    '%': ["##   ", "##  #", "   # ", "  #  ", " #   ", "#  ##", "   ##"],
     '.': ["     ", "     ", "     ", "     ", "     ", "     ", "  #  "],
     'i': ["  #  ", "     ", " ##  ", "  #  ", "  #  ", "  #  ", " ### "],
     't': ["  #  ", "  #  ", "#####", "  #  ", "  #  ", "  #  ", "   ##"],
@@ -166,6 +168,12 @@ class Screen:
     def flush(self, x=0, y=0, w=None, h=None):
         w = self.w if w is None else w
         h = self.h if h is None else h
+        if x == 0 and w == self.w:
+            # full-width region is contiguous: one write, no partial states
+            off = y * self.w * 2
+            self.fb.seek(off)
+            self.fb.write(self.scene[off:off + h * self.w * 2])
+            return
         for r in range(y, y + h):
             off = (r * self.w + x) * 2
             self.fb.seek(off)
@@ -467,6 +475,37 @@ def vol_set(pct):
     return pct
 
 
+# ── brightness (pwm-backlight via sysfs) ─────────────────────────────────────
+
+BL_DIR = '/sys/class/backlight/backlight'
+
+
+def _bl_read(name):
+    with open(f'{BL_DIR}/{name}') as f:
+        return int(f.read())
+
+
+def get_brightness():
+    try:
+        mx = _bl_read('max_brightness') or 255
+        return max(0, min(100, round(_bl_read('brightness') * 100 / mx)))
+    except (OSError, ValueError):
+        return 100
+
+
+def set_brightness(pct):
+    # 5% floor: brightness 0 switches the panel backlight fully OFF and the
+    # user would be stuck dragging a slider on an invisible screen.
+    pct = max(5, min(100, int(pct)))
+    try:
+        mx = _bl_read('max_brightness') or 255
+        with open(f'{BL_DIR}/brightness', 'w') as f:
+            f.write(str(max(1, round(pct * mx / 100))))
+    except (OSError, ValueError):
+        pass
+    return pct
+
+
 def run_terminal():
     # fbcon renders the VT on fb0; the Lyra UART Keyboard has a kbd handler,
     # so it types straight into the console. Exiting the shell returns here.
@@ -481,6 +520,9 @@ def run_terminal():
         cmd = ['openvt', '-f', '-c', '2', '-s', '-w', '--', '/bin/sh']
     subprocess.call(cmd, env=dict(os.environ, HOME='/root', TERM='linux'))
     subprocess.call(['chvt', '1'])  # make sure the VT with our fb is active
+    time.sleep(0.2)  # let fbcon finish repainting tty1 before we draw over it
+    # (without this the console repaint lands after our menu redraw and
+    #  leaves text fragments on screen)
 
 
 # ── UI ───────────────────────────────────────────────────────────────────────
@@ -520,8 +562,9 @@ def column(scr, entries):
     return column_from(scr, entries, BTN_TOP)
 
 
-# Volume slider geometry on the settings page (and its touch target).
-SLIDER_X, SLIDER_Y, SLIDER_H = 24, 50, 26
+# Brightness slider geometry on the settings page (and its touch target).
+SLIDER_X, SLIDER_Y, SLIDER_H = 24, 46, 24
+VOLROW_Y, VOLROW_H = SLIDER_Y + SLIDER_H + 18, 30
 
 
 def make_pages(scr):
@@ -531,40 +574,55 @@ def make_pages(scr):
                         ('SD CARD', {'app': (lambda: run_sdcard(scr))})])
     main.append({'label': '', 'icon': GEAR_ICON, 'goto': 'settings',
                  'x': scr.w - 36, 'y': 6, 'w': 30, 'h': 26})
-    slider = {'slider': True, 'x': SLIDER_X, 'y': SLIDER_Y,
+    slider = {'slider': True, 'name': 'BRIGHTNESS',
+              'get': get_brightness, 'set': set_brightness,
+              'x': SLIDER_X, 'y': SLIDER_Y,
               'w': scr.w - 2 * SLIDER_X, 'h': SLIDER_H}
-    settings = [slider] + column_from(scr, [
+    # volume: [VOL -]  live %  [VOL +]
+    gap = 8
+    bw3 = (scr.w - 2 * SLIDER_X - 2 * gap) // 3
+    volrow = [
+        {'label': 'VOL -', 'act': (lambda: vol_set(get_volume() - 10)),
+         'x': SLIDER_X, 'y': VOLROW_Y, 'w': bw3, 'h': VOLROW_H},
+        {'display': (lambda: '%d%%' % get_volume()),
+         'x': SLIDER_X + bw3 + gap, 'y': VOLROW_Y, 'w': bw3, 'h': VOLROW_H},
+        {'label': 'VOL +', 'act': (lambda: vol_set(get_volume() + 10)),
+         'x': SLIDER_X + 2 * (bw3 + gap), 'y': VOLROW_Y, 'w': bw3, 'h': VOLROW_H},
+    ]
+    settings = [slider] + volrow + column_from(scr, [
         ('CALIBRATE', {'app': run_calibrate}),
         ('RESTART', {'cmd': 'sync; reboot', 'msg': 'RESTARTING...'}),
         ('POWER OFF', {'cmd': 'sync; poweroff', 'msg': 'POWERING OFF'}),
-        ('BACK', {'goto': 'main'})], top=SLIDER_Y + SLIDER_H + 16)
+        ('BACK', {'goto': 'main'})], top=VOLROW_Y + VOLROW_H + 10)
     return {'main': main, 'settings': settings}
 
 
 def slider_pct(b, x):
-    """Volume % for a pointer x over slider b (quantized to 5%)."""
+    """Percent for a pointer x over slider b (quantized to 5%)."""
     pct = (x - b['x']) * 100.0 / max(1, b['w'])
     return max(0, min(100, int(round(pct / 5.0) * 5)))
 
 
-def draw_slider(scr, b, hover):
-    """Volume slider on the settings page: label, track + fill + knob, and %."""
-    vol = get_volume()
+def draw_slider(scr, b, hover, flush=True):
+    """Generic slider: label, track + fill + knob, and %. Value comes from
+    b['get'] (e.g. backlight brightness); b['set'] applies drags/taps."""
+    pct = b['get']()
     bx, by, bw, bh = b['x'], b['y'], b['w'], b['h']
     scr.fill_rect(bx, by - 18, bw, 16, C_BG)              # clear label area
-    scr.text('VOLUME', bx, by - 18, 2, C_TITLE)
+    scr.text(b['name'], bx, by - 18, 2, C_TITLE)
     scr.fill_rect(bx, by, bw, bh, C_WHITE)                # border
     scr.fill_rect(bx + 1, by + 1, bw - 2, bh - 2, C_BTN)  # groove
-    fillw = int((bw - 2) * vol / 100)
+    fillw = int((bw - 2) * pct / 100)
     if fillw > 0:
         scr.fill_rect(bx + 1, by + 1, fillw, bh - 2,
                       C_BTNHI if hover else C_TITLE)
     kx = bx + min(fillw, bw - 4)
     scr.fill_rect(kx, by - 3, 4, bh + 6, C_WHITE)         # knob
-    txt = str(vol)
+    txt = str(pct)
     scr.text(txt, bx + bw - scr.text_width(txt, 2) - 6,
              by + (bh - GLYPH_H * 2) // 2, 2, C_TEXT)
-    scr.flush(bx, by - 18, bw + 4, bh + 24)
+    if flush:
+        scr.flush(bx, by - 18, bw + 4, bh + 24)
 
 
 def make_gba_page(scr):
@@ -585,9 +643,20 @@ def make_gba_page(scr):
     return column(scr, entries)
 
 
-def draw_button(scr, b, hover):
+def draw_button(scr, b, hover, flush=True):
     if b.get('slider'):
-        draw_slider(scr, b, hover)
+        draw_slider(scr, b, hover, flush)
+        return
+    if b.get('display'):
+        # borderless live-value text (e.g. current volume between VOL -/+)
+        scr.fill_rect(b['x'], b['y'], b['w'], b['h'], C_BG)
+        s = 2
+        txt = b['display']()
+        tw = scr.text_width(txt, s)
+        scr.text(txt, b['x'] + (b['w'] - tw) // 2,
+                 b['y'] + (b['h'] - GLYPH_H * s) // 2, s, C_TEXT)
+        if flush:
+            scr.flush(b['x'], b['y'], b['w'], b['h'])
         return
     face = C_BTNHI if hover else C_BTN
     txt = C_TEXTHI if hover else C_TEXT
@@ -607,18 +676,22 @@ def draw_button(scr, b, hover):
         tw = scr.text_width(b['label'], s)
         scr.text(b['label'], b['x'] + (b['w'] - tw) // 2,
                  b['y'] + (b['h'] - GLYPH_H * s) // 2, s, txt)
-    scr.flush(b['x'], b['y'], b['w'], b['h'])
+    if flush:
+        scr.flush(b['x'], b['y'], b['w'], b['h'])
 
 
 def draw_page(scr, name, btns, hover_idx):
+    # Compose the whole page in the scene buffer, then flush once: flushing
+    # background and buttons separately briefly showed mixed old/new frames
+    # ("artifacts") on page changes.
     scr.fill_rect(0, 0, scr.w, scr.h, C_BG)
     title = 'BIT-0' if name == 'main' else name.upper()
     s = 2
     tw = scr.text_width(title, s)
     scr.text(title, (scr.w - tw) // 2, 12, s, C_TITLE)
-    scr.flush()
     for i, b in enumerate(btns):
-        draw_button(scr, b, i == hover_idx)
+        draw_button(scr, b, i == hover_idx, flush=False)
+    scr.flush()
 
 
 def fullscreen_message(scr, msg):
@@ -770,10 +843,10 @@ def main():
             scr.erase_cursor(*getattr(scr, '_last_cur', (cx, cy)))
             on_slider = new_hover >= 0 and btns[new_hover].get('slider')
             if on_slider and (clicked or held):
-                # tap or drag on the volume slider sets the level by position
+                # tap or drag on the slider sets its value by position
                 target = slider_pct(btns[new_hover], cx)
                 if target != getattr(scr, '_slider_last', None):
-                    vol_set(target)
+                    btns[new_hover]['set'](target)
                     scr._slider_last = target
                 if hover >= 0 and hover != new_hover:
                     draw_button(scr, btns[hover], False)
