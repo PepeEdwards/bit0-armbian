@@ -1,0 +1,15 @@
+#!/bin/sh
+# Single source of truth for the Bit0's volume (audit 3.2). Every trigger
+# path — launcher UI, uart-hid-bridge volume keys, triggerhappy mute — calls
+# this instead of carrying its own amixer incantation.
+# 'Master' is the softvol control from /etc/asound.conf; it exists only
+# after bit0-alsa-init has instantiated it (first open of the softvol PCM).
+STEP=10
+case "${1:-}" in
+	up)    exec amixer -q set Master "${STEP}%+" ;;
+	down)  exec amixer -q set Master "${STEP}%-" ;;
+	mute)  exec amixer -q set Master 0% ;;   # softvol has no playback switch
+	set)   exec amixer -q set Master "${2:?usage: bit0-vol set <pct>}%" ;;
+	get)   amixer get Master 2>/dev/null | grep -o '\[[0-9]*%\]' | head -1 | tr -d '[]%' ;;
+	*)     echo "usage: bit0-vol {up|down|mute|get|set <pct>}" >&2; exit 1 ;;
+esac

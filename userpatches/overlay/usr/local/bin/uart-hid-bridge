@@ -22,6 +22,7 @@ import os
 import sys
 import struct
 import fcntl
+import subprocess
 import time
 import serial
 
@@ -98,13 +99,14 @@ SYSTEM_TO_LINUX = {
     0x83: 143,  # Wake Up → KEY_WAKEUP
 }
 
-# Volume consumer usages (report_id == 4) driven straight to ALSA. DirectFB
-# grabs the uinput keyboard exclusively while pico8/SDL runs, so injecting
-# KEY_VOLUME* + relying on triggerhappy fails in-game. Running amixer from the
-# bridge (the input source) works everywhere.
+# Volume consumer usages (report_id == 4) driven straight to ALSA via
+# bit0-vol (the single owner of the amixer invocation). SDL grabs the uinput
+# keyboard exclusively while pico8 runs, so injecting KEY_VOLUME* + relying
+# on triggerhappy fails in-game; acting here (the input source) works
+# everywhere. Because these are consumed, KEY_VOLUME* is never injected.
 VOL_CMDS = {
-    0x00E9: "/usr/bin/amixer -q set Master 10%+ >/dev/null 2>&1",  # Volume Up
-    0x00EA: "/usr/bin/amixer -q set Master 10%- >/dev/null 2>&1",  # Volume Down
+    0x00E9: ['/usr/local/bin/bit0-vol', 'up'],    # Volume Up
+    0x00EA: ['/usr/local/bin/bit0-vol', 'down'],  # Volume Down
 }
 
 
@@ -240,7 +242,9 @@ def main():
             # the uinput keyboard, e.g. inside pico8). Act once per press.
             if report_id == 4 and usage in VOL_CMDS:
                 if usage != prev_extra_usage:
-                    os.system(VOL_CMDS[usage])
+                    subprocess.call(VOL_CMDS[usage],
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL)
                 prev_extra_usage = usage
                 continue
             if report_id == 4 and usage == 0 and prev_extra_usage in VOL_CMDS:

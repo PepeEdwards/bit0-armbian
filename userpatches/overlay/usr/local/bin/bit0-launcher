@@ -10,7 +10,6 @@ Started at boot by /etc/init.d/S99bit0-launcher.
 """
 
 import os
-import re
 import sys
 import struct
 import fcntl
@@ -417,27 +416,29 @@ def run_sdcard(scr):
 
 
 def run_calibrate():
-    subprocess.call('systemctl stop touch-mouse; '
-                    '/usr/local/bin/touch-cal; '
-                    'systemctl start touch-mouse', shell=True)
+    subprocess.call(['systemctl', 'stop', 'touch-mouse'])
+    subprocess.call(['/usr/local/bin/touch-cal'])
+    subprocess.call(['systemctl', 'start', 'touch-mouse'])
     time.sleep(2)  # let the uinput device reappear before reopening inputs
 
 
-# ── volume (ALSA Master via amixer) ───────────────────────────────────────────
+# ── volume (via bit0-vol, the single owner of the amixer invocation) ─────────
+
+VOL_HELPER = '/usr/local/bin/bit0-vol'
+
 
 def get_volume():
     try:
-        out = subprocess.check_output(['amixer', 'get', 'Master'],
-                                      stderr=subprocess.DEVNULL).decode()
-        m = re.search(r'\[(\d+)%\]', out)
-        return int(m.group(1)) if m else 0
-    except Exception:
+        out = subprocess.check_output([VOL_HELPER, 'get'],
+                                      stderr=subprocess.DEVNULL)
+        return int(out.strip() or 0)
+    except (OSError, ValueError, subprocess.CalledProcessError):
         return 0
 
 
 def vol_set(pct):
     pct = max(0, min(100, int(pct)))
-    subprocess.call(['amixer', '-q', 'set', 'Master', '%d%%' % pct],
+    subprocess.call([VOL_HELPER, 'set', str(pct)],
                     stderr=subprocess.DEVNULL)
     return pct
 
@@ -557,8 +558,8 @@ def make_pages(scr):
     ]
     settings = [slider] + volrow + column_from(scr, [
         ('CALIBRATE', {'app': run_calibrate}),
-        ('RESTART', {'cmd': 'sync; reboot', 'msg': 'RESTARTING...'}),
-        ('POWER OFF', {'cmd': 'sync; poweroff', 'msg': 'POWERING OFF'})],
+        ('RESTART', {'cmd': [['sync'], ['reboot']], 'msg': 'RESTARTING...'}),
+        ('POWER OFF', {'cmd': [['sync'], ['poweroff']], 'msg': 'POWERING OFF'})],
         top=VOLROW_Y + VOLROW_H + 10)
     # back arrow top-left (mirrors the gear top-right on the main page)
     settings.append({'label': '', 'icon': BACK_ICON, 'goto': 'main',
@@ -824,7 +825,8 @@ def main():
             elif 'cmd' in b:
                 print(f'bit0-launcher: {b["msg"]}', flush=True)
                 fullscreen_message(scr, b['msg'])
-                os.system(b['cmd'])
+                for argv in b['cmd']:
+                    subprocess.call(argv)
                 time.sleep(60)  # init takes over from here
             elif 'act' in b:
                 # in-page action (e.g. volume +/-): run it and stay on the
