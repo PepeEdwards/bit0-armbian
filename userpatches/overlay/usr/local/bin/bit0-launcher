@@ -1,216 +1,37 @@
 #!/usr/bin/env python3
 """Bit-0 boot launcher.
 
-Draws a splash + 3-button menu (Terminal / PICO-8 / Calibrate) straight to
-/dev/fb0 (RGB565) and reads the Lyra UART Mouse (relative) and Lyra Touch
-Mouse (absolute, from the touch-mouse daemon) for pointer input. No
-DirectFB/SDL dependency, so it coexists with whatever the launched apps use.
+Draws a splash + button menu (Terminal / PICO-8 / SD Card / settings)
+straight to /dev/fb0 (RGB565) and reads the Lyra UART Mouse (relative) and
+Lyra Touch Mouse (absolute, from the touch-mouse daemon) for pointer input.
 
-Started at boot by /etc/init.d/S99bit0-launcher.
+Drawing, app launching, and SD handling live in the bit0 lib
+(/usr/local/lib/bit0); this file owns the pages, widgets, and event loop.
+
+Started at boot by bit0-launcher.service.
 """
 
 import os
 import sys
-import struct
 import fcntl
 import select
-import shutil
 import subprocess
 import time
 
 sys.path.insert(0, '/usr/local/lib')
 from bit0.evdev import (EV_SYN, EV_KEY, EV_REL, EV_ABS,
                         REL_X, REL_Y, ABS_X, ABS_Y, BTN_LEFT, BTN_TOUCH,
-                        EVENT_SIZE, unpack_event, find_event, fb_size)
-
-FBDEV = '/dev/fb0'
+                        EVENT_SIZE, unpack_event, find_event)
+from bit0.fb import (Screen, fullscreen_message, GLYPH_H,
+                     GEAR_ICON, BACK_ICON,
+                     C_BG, C_TITLE, C_BTN, C_BTNHI, C_TEXT, C_TEXTHI,
+                     C_BLACK, C_WHITE)
+from bit0.apps import (kill_stale, run_pico8, run_terminal, run_calibrate,
+                       get_volume, vol_set, get_brightness, set_brightness)
+from bit0.sdspi import run_sdcard, sd_release
 
 MOUSE_NAME = 'Lyra UART Mouse'
 TOUCH_NAME = 'Lyra Touch Mouse'
-
-# ── colors (RGB565) ──────────────────────────────────────────────────────────
-C_BG     = 0x18C3  # dark gray
-C_TITLE  = 0xFD20  # orange
-C_BTN    = 0x39E7  # button face
-C_BTNHI  = 0xFD20  # hovered button face
-C_TEXT   = 0xFFFF
-C_TEXTHI = 0x0000
-C_BLACK  = 0x0000
-C_WHITE  = 0xFFFF
-
-# ── 5x7 font as ASCII art (6th column = spacing) ────────────────────────────
-FONT = {
-    'A': [" ### ", "#   #", "#   #", "#####", "#   #", "#   #", "#   #"],
-    'B': ["#### ", "#   #", "#   #", "#### ", "#   #", "#   #", "#### "],
-    'C': [" ####", "#    ", "#    ", "#    ", "#    ", "#    ", " ####"],
-    'D': ["#### ", "#   #", "#   #", "#   #", "#   #", "#   #", "#### "],
-    'E': ["#####", "#    ", "#    ", "#### ", "#    ", "#    ", "#####"],
-    'G': [" ####", "#    ", "#    ", "#  ##", "#   #", "#   #", " ####"],
-    'H': ["#   #", "#   #", "#   #", "#####", "#   #", "#   #", "#   #"],
-    'I': [" ### ", "  #  ", "  #  ", "  #  ", "  #  ", "  #  ", " ### "],
-    'L': ["#    ", "#    ", "#    ", "#    ", "#    ", "#    ", "#####"],
-    'M': ["#   #", "## ##", "# # #", "# # #", "#   #", "#   #", "#   #"],
-    'N': ["#   #", "##  #", "# # #", "#  ##", "#   #", "#   #", "#   #"],
-    'O': [" ### ", "#   #", "#   #", "#   #", "#   #", "#   #", " ### "],
-    'P': ["#### ", "#   #", "#   #", "#### ", "#    ", "#    ", "#    "],
-    'R': ["#### ", "#   #", "#   #", "#### ", "# #  ", "#  # ", "#   #"],
-    'S': [" ####", "#    ", "#    ", " ### ", "    #", "    #", "#### "],
-    'T': ["#####", "  #  ", "  #  ", "  #  ", "  #  ", "  #  ", "  #  "],
-    'U': ["#   #", "#   #", "#   #", "#   #", "#   #", "#   #", " ### "],
-    'W': ["#   #", "#   #", "#   #", "# # #", "# # #", "## ##", "#   #"],
-    'F': ["#####", "#    ", "#    ", "#### ", "#    ", "#    ", "#    "],
-    'J': ["  ###", "   # ", "   # ", "   # ", "   # ", "#  # ", " ##  "],
-    'K': ["#   #", "#  # ", "# #  ", "##   ", "# #  ", "#  # ", "#   #"],
-    'Q': [" ### ", "#   #", "#   #", "#   #", "# # #", "#  # ", " ## #"],
-    'V': ["#   #", "#   #", "#   #", "#   #", "#   #", " # # ", "  #  "],
-    'X': ["#   #", "#   #", " # # ", "  #  ", " # # ", "#   #", "#   #"],
-    'Y': ["#   #", "#   #", " # # ", "  #  ", "  #  ", "  #  ", "  #  "],
-    'Z': ["#####", "    #", "   # ", "  #  ", " #   ", "#    ", "#####"],
-    '1': ["  #  ", " ##  ", "  #  ", "  #  ", "  #  ", "  #  ", " ### "],
-    '2': [" ### ", "#   #", "    #", "   # ", "  #  ", " #   ", "#####"],
-    '3': [" ### ", "#   #", "    #", "  ## ", "    #", "#   #", " ### "],
-    '4': ["   # ", "  ## ", " # # ", "#  # ", "#####", "   # ", "   # "],
-    '5': ["#####", "#    ", "#### ", "    #", "    #", "#   #", " ### "],
-    '6': [" ### ", "#    ", "#    ", "#### ", "#   #", "#   #", " ### "],
-    '7': ["#####", "    #", "   # ", "  #  ", " #   ", " #   ", " #   "],
-    '9': [" ### ", "#   #", "#   #", " ####", "    #", "    #", " ### "],
-    '_': ["     ", "     ", "     ", "     ", "     ", "     ", "#####"],
-    '/': ["    #", "    #", "   # ", "  #  ", " #   ", "#    ", "#    "],
-    '0': [" ### ", "#   #", "#  ##", "# # #", "##  #", "#   #", " ### "],
-    '8': [" ### ", "#   #", "#   #", " ### ", "#   #", "#   #", " ### "],
-    '-': ["     ", "     ", "     ", "#####", "     ", "     ", "     "],
-    '+': ["     ", "  #  ", "  #  ", "#####", "  #  ", "  #  ", "     "],
-    '%': ["##   ", "##  #", "   # ", "  #  ", " #   ", "#  ##", "   ##"],
-    '.': ["     ", "     ", "     ", "     ", "     ", "     ", "  #  "],
-    'i': ["  #  ", "     ", " ##  ", "  #  ", "  #  ", "  #  ", " ### "],
-    't': ["  #  ", "  #  ", "#####", "  #  ", "  #  ", "  #  ", "   ##"],
-    ' ': ["     ", "     ", "     ", "     ", "     ", "     ", "     "],
-}
-GLYPH_W, GLYPH_H = 6, 7
-
-ARROW = [
-    "#       ",
-    "##      ",
-    "#*#     ",
-    "#**#    ",
-    "#***#   ",
-    "#****#  ",
-    "#*****# ",
-    "#******#",
-    "#***####",
-    "#*#**#  ",
-    "## #**# ",
-    "#   ##  ",
-]
-CUR_W, CUR_H = 8, 12
-
-POWER_ICON = [
-    "      ##      ",
-    "  ##  ##  ##  ",
-    " ##   ##   ## ",
-    "##    ##    ##",
-    "##    ##    ##",
-    "##          ##",
-    "##          ##",
-    " ##        ## ",
-    "  ##      ##  ",
-    "   ########   ",
-]
-
-GEAR_ICON = [
-    "     ###     ",
-    "     ###     ",
-    "   #######   ",
-    "  #########  ",
-    "  #########  ",
-    "#####   #####",
-    "#####   #####",
-    "#####   #####",
-    "  #########  ",
-    "  #########  ",
-    "   #######   ",
-    "     ###     ",
-    "     ###     ",
-]
-
-BACK_ICON = [
-    "     #       ",
-    "    ##       ",
-    "   ###       ",
-    "  ####       ",
-    " ############",
-    "#############",
-    "#############",
-    " ############",
-    "  ####       ",
-    "   ###       ",
-    "    ##       ",
-    "     #       ",
-]
-
-
-class Screen:
-    def __init__(self):
-        self.w, self.h = fb_size()
-        self.fb = open(FBDEV, 'r+b', buffering=0)
-        self.scene = bytearray(self.w * self.h * 2)
-
-    def fill_rect(self, x, y, w, h, color):
-        px = struct.pack('<H', color)
-        row = px * w
-        for r in range(y, y + h):
-            off = (r * self.w + x) * 2
-            self.scene[off:off + w * 2] = row
-
-    def text(self, s, x, y, scale, color):
-        px = struct.pack('<H', color)
-        for ch in s:
-            glyph = FONT.get(ch, FONT[' '])
-            for gy, line in enumerate(glyph):
-                for gx, c in enumerate(line):
-                    if c == '#':
-                        self.fill_rect(x + gx * scale, y + gy * scale,
-                                       scale, scale, color)
-            x += GLYPH_W * scale
-
-    def text_width(self, s, scale):
-        return len(s) * GLYPH_W * scale
-
-    def flush(self, x=0, y=0, w=None, h=None):
-        w = self.w if w is None else w
-        h = self.h if h is None else h
-        if x == 0 and w == self.w:
-            # full-width region is contiguous: one write, no partial states
-            off = y * self.w * 2
-            self.fb.seek(off)
-            self.fb.write(self.scene[off:off + h * self.w * 2])
-            return
-        for r in range(y, y + h):
-            off = (r * self.w + x) * 2
-            self.fb.seek(off)
-            self.fb.write(self.scene[off:off + w * 2])
-
-    def draw_cursor(self, cx, cy):
-        """Composite arrow over scene into a temp patch, write only that."""
-        for gy, line in enumerate(ARROW):
-            ry = cy + gy
-            if not (0 <= ry < self.h):
-                continue
-            off = (ry * self.w + cx) * 2
-            n = min(CUR_W, self.w - cx)
-            patch = bytearray(self.scene[off:off + n * 2])
-            for gx in range(n):
-                c = line[gx]
-                if c == '#':
-                    patch[gx * 2:gx * 2 + 2] = struct.pack('<H', C_BLACK)
-                elif c == '*':
-                    patch[gx * 2:gx * 2 + 2] = struct.pack('<H', C_WHITE)
-            self.fb.seek(off)
-            self.fb.write(patch)
-
-    def erase_cursor(self, cx, cy):
-        self.flush(cx, min(cy, self.h - 1),
-                   min(CUR_W, self.w - cx), min(CUR_H, self.h - cy))
 
 
 def open_inputs():
@@ -234,263 +55,6 @@ def close_inputs(devs):
             f.close()
         except OSError:
             pass
-
-
-# ── apps ─────────────────────────────────────────────────────────────────────
-
-# ── SPI SD card (on-demand) ───────────────────────────────────────────────────
-# The SD slot sits on spi0 (CS2) sharing the bus with the display+touch. Leaving
-# mmc_spi bound makes it poll the card forever and stall the bus (display freeze),
-# so it lives UNBOUND. We bind it only to read a cart, then unbind to free the
-# bus before launching. Needs the DT mmc@2 node enabled (status="okay") so the
-# spi0.2 device exists; if it's disabled, sd_slot_present() is False.
-SD_SPI      = 'spi0.2'
-MMC_DRV     = '/sys/bus/spi/drivers/mmc_spi'
-SD_DEV_SYS  = '/sys/bus/spi/devices/' + SD_SPI
-SD_MOUNT    = '/mnt/sd'
-SD_CACHE    = '/root/pico-8/carts/sdcard'
-
-
-def _sysfs_write(path, val):
-    try:
-        with open(path, 'w') as f:
-            f.write(val)
-        return True
-    except OSError:
-        return False
-
-
-def sd_slot_present():
-    return os.path.exists(SD_DEV_SYS)
-
-
-def sd_bound():
-    return os.path.exists(SD_DEV_SYS + '/driver')
-
-
-def sd_release():
-    """Unbind mmc_spi so it stops polling the SPI bus."""
-    if sd_bound():
-        _sysfs_write(MMC_DRV + '/unbind', SD_SPI)
-
-
-def sd_enable():
-    if sd_slot_present() and not sd_bound():
-        _sysfs_write(MMC_DRV + '/bind', SD_SPI)
-
-
-def _mmcblk_base():
-    try:
-        return {d for d in os.listdir('/sys/block') if d.startswith('mmcblk')}
-    except OSError:
-        return set()
-
-
-def _find_mount(dev):
-    """Mountpoint of `dev` (e.g. mmcblk1) or any of its partitions, else None.
-    The hotplug daemon auto-mounts cards under /media/<name>."""
-    if not dev:
-        return None
-    try:
-        with open('/proc/mounts') as f:
-            for line in f:
-                parts = line.split()
-                if len(parts) >= 2 and parts[0].startswith('/dev/' + dev):
-                    return parts[1].replace('\\040', ' ')
-    except OSError:
-        pass
-    return None
-
-
-def _kill_stale(*names):
-    # The MAX98357A amp is a single-stream PCM (no mixing): a leftover/orphaned
-    # instance holding /dev/snd/pcmC0D0p blocks the next app's audio entirely.
-    # Clear any stragglers before (re)launching.
-    for n in names:
-        subprocess.call(['killall', n],
-                        stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-
-
-def run_pico8(scr=None):
-    # pico-8 is proprietary and only present if it was in the build overlay
-    # or pushed with install-pico8.sh; see docs/PICO8.md. All launch logic
-    # (env, GL workarounds, stretch shim) lives in /usr/local/bin/pico8-launch.
-    if not os.path.exists('/root/pico-8/pico8_dyn'):
-        if scr:
-            fullscreen_message(scr, 'PICO-8 NOT INSTALLED')
-            time.sleep(2.5)
-        return
-    _kill_stale('pico8_dyn')
-    subprocess.call(['/usr/local/bin/pico8-launch'],
-                    env=dict(os.environ, HOME='/root'))
-
-
-def run_pico8_cart(cart):
-    _kill_stale('pico8_dyn')
-    subprocess.call(['/usr/local/bin/pico8-launch', '-run', cart],
-                    env=dict(os.environ, HOME='/root'))
-
-
-def run_sdcard(scr):
-    """Bind the SPI SD card, copy any PICO-8 cart to the cache, unbind to free
-    the bus, then launch the first cart found."""
-    if not sd_slot_present():
-        fullscreen_message(scr, 'SD SLOT DISABLED')
-        time.sleep(2)
-        return
-    fullscreen_message(scr, 'READING SD...')
-    sd_release()                              # clean state, so bind yields a new dev
-    time.sleep(0.4)
-    before = _mmcblk_base()
-    sd_enable()
-
-    dev = None
-    for _ in range(40):                       # up to ~4s for the card to init
-        time.sleep(0.1)
-        new = sorted(d for d in (_mmcblk_base() - before) if 'p' not in d)
-        if new:
-            dev = new[0]
-            break
-    if not dev:
-        fullscreen_message(scr, 'NO SD CARD')
-        sd_release(); time.sleep(2)
-        return
-
-    # The hotplug daemon auto-mounts the card under /media/<name>. Wait for
-    # that; only mount it ourselves if no automount appears.
-    mountpoint = None
-    own_mount = False
-    for _ in range(30):                       # up to ~3s for the automount
-        mountpoint = _find_mount(dev)
-        if mountpoint:
-            break
-        time.sleep(0.1)
-    if not mountpoint:
-        node = '/dev/%sp1' % dev
-        if not os.path.exists(node):
-            node = '/dev/' + dev
-        os.makedirs(SD_MOUNT, exist_ok=True)
-        if any(subprocess.call(['mount', '-o', 'ro', '-t', fs, node, SD_MOUNT],
-                               stderr=subprocess.DEVNULL) == 0
-               for fs in ('exfat', 'vfat', 'auto')):
-            mountpoint, own_mount = SD_MOUNT, True
-    if not mountpoint:
-        fullscreen_message(scr, 'CANT READ CARD')
-        sd_release(); time.sleep(2)
-        return
-
-    found = []
-    for root, _dirs, files in os.walk(mountpoint):
-        if 'System Volume Information' in root:
-            continue
-        for fn in sorted(files):
-            low = fn.lower()
-            if low.endswith('.p8.png') or low.endswith('.p8'):
-                found.append(os.path.join(root, fn))
-        if len(found) >= 30:
-            break
-
-    cached = []
-    if found:
-        fullscreen_message(scr, 'COPYING...')
-        os.makedirs(SD_CACHE, exist_ok=True)
-        for src in found:
-            dst = os.path.join(SD_CACHE, os.path.basename(src))
-            try:
-                shutil.copyfile(src, dst)
-                cached.append(dst)
-            except OSError:
-                pass
-
-    # Release the bus (unmount + unbind) BEFORE launching, as requested.
-    subprocess.call(['umount', mountpoint], stderr=subprocess.DEVNULL)
-    sd_release()
-
-    if not cached:
-        fullscreen_message(scr, 'NO PICO-8 GAME')
-        time.sleep(2)
-        return
-
-    fullscreen_message(scr, 'LAUNCHING...')
-    run_pico8_cart(cached[0])                 # extra carts stay in SD_CACHE
-
-
-def run_calibrate():
-    subprocess.call(['systemctl', 'stop', 'touch-mouse'])
-    subprocess.call(['/usr/local/bin/touch-cal'])
-    subprocess.call(['systemctl', 'start', 'touch-mouse'])
-    time.sleep(2)  # let the uinput device reappear before reopening inputs
-
-
-# ── volume (via bit0-vol, the single owner of the amixer invocation) ─────────
-
-VOL_HELPER = '/usr/local/bin/bit0-vol'
-
-
-def get_volume():
-    try:
-        out = subprocess.check_output([VOL_HELPER, 'get'],
-                                      stderr=subprocess.DEVNULL)
-        return int(out.strip() or 0)
-    except (OSError, ValueError, subprocess.CalledProcessError):
-        return 0
-
-
-def vol_set(pct):
-    pct = max(0, min(100, int(pct)))
-    subprocess.call([VOL_HELPER, 'set', str(pct)],
-                    stderr=subprocess.DEVNULL)
-    return pct
-
-
-# ── brightness (pwm-backlight via sysfs) ─────────────────────────────────────
-
-BL_DIR = '/sys/class/backlight/backlight'
-
-
-def _bl_read(name):
-    with open(f'{BL_DIR}/{name}') as f:
-        return int(f.read())
-
-
-def get_brightness():
-    try:
-        mx = _bl_read('max_brightness') or 255
-        return max(0, min(100, round(_bl_read('brightness') * 100 / mx)))
-    except (OSError, ValueError):
-        return 100
-
-
-def set_brightness(pct):
-    # 5% floor: brightness 0 switches the panel backlight fully OFF and the
-    # user would be stuck dragging a slider on an invisible screen.
-    pct = max(5, min(100, int(pct)))
-    try:
-        mx = _bl_read('max_brightness') or 255
-        with open(f'{BL_DIR}/brightness', 'w') as f:
-            f.write(str(max(1, round(pct * mx / 100))))
-    except (OSError, ValueError):
-        pass
-    return pct
-
-
-def run_terminal():
-    # fbcon renders the VT on fb0; the Lyra UART Keyboard has a kbd handler,
-    # so it types straight into the console. Exiting the shell returns here.
-    # -c 2 is mandatory: busybox openvt's free-VT query asks /dev/console,
-    # which is the serial port on this board, and fails with "can't find
-    # open VT". -f forces reuse of VT2 on repeated launches.
-    # Plain non-login shell: `sh -l` would source /root/.profile, which
-    # chains into bash and whatever its rc files start.
-    if shutil.which('fbterm'):
-        cmd = ['openvt', '-f', '-c', '2', '-s', '-w', '--', 'fbterm']
-    else:
-        cmd = ['openvt', '-f', '-c', '2', '-s', '-w', '--', '/bin/sh']
-    subprocess.call(cmd, env=dict(os.environ, HOME='/root', TERM='linux'))
-    subprocess.call(['chvt', '1'])  # make sure the VT with our fb is active
-    time.sleep(0.2)  # let fbcon finish repainting tty1 before we draw over it
-    # (without this the console repaint lands after our menu redraw and
-    #  leaves text fragments on screen)
 
 
 # ── UI ───────────────────────────────────────────────────────────────────────
@@ -646,14 +210,6 @@ def draw_page(scr, name, btns, hover_idx):
     scr.flush()
 
 
-def fullscreen_message(scr, msg):
-    scr.fill_rect(0, 0, scr.w, scr.h, C_BLACK)
-    s = 2
-    tw = scr.text_width(msg, s)
-    scr.text(msg, (scr.w - tw) // 2, (scr.h - GLYPH_H * s) // 2, s, C_WHITE)
-    scr.flush()
-
-
 def hit(btns, x, y):
     for i, b in enumerate(btns):
         if b['x'] <= x < b['x'] + b['w'] and b['y'] <= y < b['y'] + b['h']:
@@ -685,7 +241,7 @@ def main():
     sd_release()
     # Clear any app orphaned by a previous launcher restart still holding the
     # single-stream audio amp (would mute the next launch).
-    _kill_stale('pico8_dyn')
+    kill_stale('pico8_dyn')
     # keep fbcon from blinking its cursor over our pixels
     try:
         with open('/sys/class/graphics/fbcon/cursor_blink', 'w') as f:

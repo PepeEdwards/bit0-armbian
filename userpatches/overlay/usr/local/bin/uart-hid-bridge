@@ -33,7 +33,8 @@ from bit0.evdev import (EV_SYN, EV_KEY, EV_REL, SYN_REPORT,
                         send_event)
 from bit0.uinput import create_device
 
-UART_DEV        = "/dev/ttyS2"
+# Hardware identity is overridable (systemd Environment=); tunables are code.
+UART_DEV        = os.environ.get('BIT0_UART', '/dev/ttyS2')
 UART_BAUD       = 115200
 MAGIC           = 0xAA
 TYPE_KBD        = 0x01

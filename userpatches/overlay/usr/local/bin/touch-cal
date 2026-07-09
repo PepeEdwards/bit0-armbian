@@ -2,7 +2,7 @@
 """On-screen touchscreen calibration for the Lyra (ili9341 fb + ADS7846).
 
 Draws 5 crosshair targets on /dev/fb0; for each, collects raw samples from
-/dev/input/event0 and takes the median. Fits an affine transform
+the touchscreen evdev node and takes the median. Fits an affine transform
 raw -> screen by least squares and writes it to /etc/touch-mouse.cal:
 
   screen_x = a*raw_x + b*raw_y + c
@@ -11,8 +11,9 @@ raw -> screen by least squares and writes it to /etc/touch-mouse.cal:
 The affine fit absorbs axis swap, inversion, scale and offset, so no
 device-tree touchscreen-* flags are needed.
 
-Stop the touch-mouse daemon first (it grabs event0):
-  /etc/init.d/S51touch-mouse stop && touch-cal && /etc/init.d/S51touch-mouse start
+Stop the touch-mouse daemon first (it grabs the device):
+  systemctl stop touch-mouse && touch-cal && systemctl start touch-mouse
+(The launcher's CALIBRATE entry does exactly this.)
 """
 
 import os
@@ -29,20 +30,15 @@ from bit0.evdev import (EV_SYN, EV_KEY, EV_ABS, BTN_TOUCH, KEY_ESC,
 
 # Same name-based resolution as touch-mouse (event numbering isn't stable).
 TOUCH_NAME = os.environ.get('BIT0_TOUCH_NAME', 'ADS7846 Touchscreen')
-EVDEV      = find_event(TOUCH_NAME) or '/dev/input/event0'
 FBDEV      = '/dev/fb0'
 CAL_FILE   = '/etc/touch-mouse.cal'
+INSET      = 30
 
 W, H = fb_size()
-
-INSET = 30
-TARGETS = [(INSET, INSET), (W - 1 - INSET, INSET), (W - 1 - INSET, H - 1 - INSET),
-           (INSET, H - 1 - INSET), (W // 2, H // 2)]
-
-fb = open(FBDEV, 'r+b', buffering=0)
+fb = None  # opened in main(); clear()/cross() draw through it
 
 
-def clear(color=0x0000):    
+def clear(color=0x0000):
     row = struct.pack('<H', color) * W
     fb.seek(0)
     for _ in range(H):
@@ -67,20 +63,8 @@ def median(vals):
     return s[len(s) // 2]
 
 
-ev = open(EVDEV, 'rb', buffering=0)
-fcntl.ioctl(ev, EVIOCGRAB, 1)  # sole consumer while calibrating
-
-kb = None
-kb_path = find_event('Lyra UART Keyboard')
-if kb_path:
-    try:
-        kb = open(kb_path, 'rb', buffering=0)
-    except OSError:
-        kb = None
-
-
-def read_touch():
-    """One touch-and-release: skip first 6 reports (settling), median the rest.
+def read_touch(ev, kb):
+    """One touch-and-release: skip first reports (settling), median the rest.
 
     ESC on the keyboard aborts calibration (keeps the previous .cal file)."""
     xs, ys = [], []
@@ -129,21 +113,6 @@ def read_touch():
                 ys.append(y)
 
 
-pts = []
-for i, (tx, ty) in enumerate(TARGETS):
-    clear()
-    cross(tx, ty)
-    rx, ry, spread_x, spread_y = read_touch()
-    print(f'target {i+1}/{len(TARGETS)} screen=({tx},{ty}) raw=({rx},{ry}) '
-          f'spread=({spread_x},{spread_y})', flush=True)
-    pts.append((rx, ry, tx, ty))
-    clear(0x07E0)  # green flash = accepted
-    time.sleep(0.3)
-
-fcntl.ioctl(ev, EVIOCGRAB, 0)
-clear()
-
-
 def solve3(A, B):
     """Gaussian elimination for the 3x3 normal equations."""
     M = [row[:] + [B[i]] for i, row in enumerate(A)]
@@ -158,28 +127,78 @@ def solve3(A, B):
     return [M[i][3] / M[i][i] for i in range(3)]
 
 
-Sxx = sum(p[0] * p[0] for p in pts)
-Sxy = sum(p[0] * p[1] for p in pts)
-Syy = sum(p[1] * p[1] for p in pts)
-Sx  = sum(p[0] for p in pts)
-Sy  = sum(p[1] for p in pts)
-A   = [[Sxx, Sxy, Sx], [Sxy, Syy, Sy], [Sx, Sy, len(pts)]]
-bx  = [sum(p[0] * p[2] for p in pts), sum(p[1] * p[2] for p in pts), sum(p[2] for p in pts)]
-by  = [sum(p[0] * p[3] for p in pts), sum(p[1] * p[3] for p in pts), sum(p[3] for p in pts)]
-a, b, c = solve3(A, bx)
-d, e, f_ = solve3(A, by)
+def fit_affine(pts):
+    """Least-squares affine raw->screen fit; returns (a, b, c, d, e, f)."""
+    Sxx = sum(p[0] * p[0] for p in pts)
+    Sxy = sum(p[0] * p[1] for p in pts)
+    Syy = sum(p[1] * p[1] for p in pts)
+    Sx  = sum(p[0] for p in pts)
+    Sy  = sum(p[1] for p in pts)
+    A   = [[Sxx, Sxy, Sx], [Sxy, Syy, Sy], [Sx, Sy, len(pts)]]
+    bx  = [sum(p[0] * p[2] for p in pts), sum(p[1] * p[2] for p in pts),
+           sum(p[2] for p in pts)]
+    by  = [sum(p[0] * p[3] for p in pts), sum(p[1] * p[3] for p in pts),
+           sum(p[3] for p in pts)]
+    return (*solve3(A, bx), *solve3(A, by))
 
-worst = 0.0
-for rx, ry, tx, ty in pts:
-    px = a * rx + b * ry + c
-    py = d * rx + e * ry + f_
-    err = ((px - tx) ** 2 + (py - ty) ** 2) ** 0.5
-    worst = max(worst, err)
-    print(f'  ({tx},{ty}) -> fit ({px:.1f},{py:.1f})  err {err:.1f}px', flush=True)
 
-with open(CAL_FILE, 'w') as fcal:
-    fcal.write(f'{a} {b} {c} {d} {e} {f_}\n')
-print(f'touch-cal: saved {CAL_FILE}; worst residual {worst:.1f}px', flush=True)
-if worst > 15:
-    print('touch-cal: WARNING residual is high - rerun calibration', flush=True)
-    sys.exit(2)
+def main():
+    global fb
+    evdev = find_event(TOUCH_NAME) or '/dev/input/event0'
+    targets = [(INSET, INSET), (W - 1 - INSET, INSET),
+               (W - 1 - INSET, H - 1 - INSET), (INSET, H - 1 - INSET),
+               (W // 2, H // 2)]
+
+    fb = open(FBDEV, 'r+b', buffering=0)
+    ev = open(evdev, 'rb', buffering=0)
+    fcntl.ioctl(ev, EVIOCGRAB, 1)  # sole consumer while calibrating
+
+    kb = None
+    kb_path = find_event('Lyra UART Keyboard')
+    if kb_path:
+        try:
+            kb = open(kb_path, 'rb', buffering=0)
+        except OSError:
+            kb = None
+
+    try:
+        pts = []
+        for i, (tx, ty) in enumerate(targets):
+            clear()
+            cross(tx, ty)
+            rx, ry, spread_x, spread_y = read_touch(ev, kb)
+            print(f'target {i+1}/{len(targets)} screen=({tx},{ty}) '
+                  f'raw=({rx},{ry}) spread=({spread_x},{spread_y})', flush=True)
+            pts.append((rx, ry, tx, ty))
+            clear(0x07E0)  # green flash = accepted
+            time.sleep(0.3)
+        clear()
+    finally:
+        try:
+            fcntl.ioctl(ev, EVIOCGRAB, 0)
+        except OSError:
+            pass
+
+    a, b, c, d, e, f_ = fit_affine(pts)
+
+    worst = 0.0
+    for rx, ry, tx, ty in pts:
+        px = a * rx + b * ry + c
+        py = d * rx + e * ry + f_
+        err = ((px - tx) ** 2 + (py - ty) ** 2) ** 0.5
+        worst = max(worst, err)
+        print(f'  ({tx},{ty}) -> fit ({px:.1f},{py:.1f})  err {err:.1f}px',
+              flush=True)
+
+    with open(CAL_FILE, 'w') as fcal:
+        fcal.write(f'{a} {b} {c} {d} {e} {f_}\n')
+    print(f'touch-cal: saved {CAL_FILE}; worst residual {worst:.1f}px',
+          flush=True)
+    if worst > 15:
+        print('touch-cal: WARNING residual is high - rerun calibration',
+              flush=True)
+        sys.exit(2)
+
+
+if __name__ == '__main__':
+    main()
