@@ -28,7 +28,7 @@ Requires a native Ubuntu 24.04 x86_64 host (WSL2 works, no Docker needed):
 ```bash
 git clone --recurse-submodules <this repo>
 cd bit0-armbian
-./scripts/build.sh
+./scripts/build.sh KERNEL_GIT=shallow
 ```
 
 The finished SD card image lands in `build/output/images/`. Flash it with
