@@ -5,9 +5,10 @@ description: Good-practice rules from audit.md for the bit0-armbian project. Use
 
 # bit0-armbian coding practices
 
-These rules come from the 2026-07 replicability audit (`audit.md`). Apply them
-to every change; when a change lands that resolves an audit finding, update
-`audit.md` in the same commit.
+These rules come from the 2026-07 replicability audit (`audit.md` — a local,
+gitignored working doc; never commit it). Apply them to every change; when a
+change lands that resolves an audit finding, update the local `audit.md`
+status lines alongside it.
 
 ## Replicability (the project's #1 goal)
 
