@@ -18,7 +18,7 @@ Where every piece of the bit0 came from, and what changed in the move.
 | SDK change | Armbian equivalent |
 |---|---|
 | edits to `rk3506-luckfox-lyra.dtsi` + `rk3506g-luckfox-lyra-sd.dts` | patch 0001: single new self-contained `rk3506g-luckfox-lyra-sd.dts` (the shared dtsi is untouched, so Lyra Plus / Zero W images are unaffected) |
-| out-of-tree `custom_driver/ili9341_display_driver/ili9341_fb.ko`, insmod'ed by `S09spi-display` | **no driver code at all** — mainline `panel-mipi-dbi` DRM driver (`CONFIG_DRM_PANEL_MIPI_DBI=m`); the panel init sequence lives in `/lib/firmware/bit0,ili9341.bin`, source + compiler in `scripts/panel-firmware/`. fbcon/`/dev/fb0` via DRM fbdev emulation. Backlight GPIO became a standard `gpio-backlight` node. |
+| out-of-tree `custom_driver/ili9341_display_driver/ili9341_fb.ko`, insmod'ed by `S09spi-display` | **no driver code at all** — mainline `panel-mipi-dbi` DRM driver (`CONFIG_DRM_PANEL_MIPI_DBI=m`); the panel init sequence lives in `/lib/firmware/bit0,ili9341.bin`, generated at image build from source + compiler in `userpatches/overlay/usr/local/src/panel-firmware/` (also shipped on-device). fbcon/`/dev/fb0` via DRM fbdev emulation. Backlight GPIO became a standard `gpio-backlight` node. |
 | `ads7846.c` poll period 5→20 ms | patch 0002, identical |
 | `rk3506_luckfox_defconfig` + `rk3506-display.config` additions | `userpatches/linux-rockchip-vendor.config` (Armbian's config + bit0 block at the end) |
 | in-kernel `lyra_i2c_keyboard.c` (I2C 0x20) | **not ported** — the bit0 uses the UART2 HID bridge |
@@ -46,7 +46,7 @@ Where every piece of the bit0 came from, and what changed in the move.
 - **event device numbering**: `touch-mouse` grabs `/dev/input/event0` by default; Debian udev may order devices differently than Buildroot did.
 - **fbcon**: `console=tty1 fbcon=font:VGA8x8` is in the DTS bootargs, but Armbian's boot.cmd/armbianEnv.txt may append its own `console=`. If the LCD console is missing, check `/boot/armbianEnv.txt` (`extraargs=fbcon=map:0 fbcon=font:VGA8x8`).
 - **Display flush rate**: the old driver throttled to 30 fps and tracked dirty lines; DRM flushes damage rects on demand instead. If touch feels starved under heavy screen updates, that's the shared-SPI contention to revisit (the ads7846 20 ms patch is the main mitigation).
-- **Panel init**: if colors/orientation are off, edit `scripts/panel-firmware/bit0,ili9341.txt` (e.g. MADCTL `0x36`, inversion `0x20/0x21`), recompile with `mipi-dbi-cmd`, and replace `/lib/firmware/bit0,ili9341.bin` — no kernel rebuild needed.
+- **Panel init**: if colors/orientation are off, edit `bit0,ili9341.txt` (e.g. MADCTL `0x36`, inversion `0x20/0x21`) — source + compiler live in `userpatches/overlay/usr/local/src/panel-firmware/` and ship on-device at `/usr/local/src/panel-firmware/`, so regenerate with `python3 mipi-dbi-cmd /usr/lib/firmware/bit0,ili9341.bin bit0,ili9341.txt` right on the device — no kernel or image rebuild needed.
 - **128 MB RAM**: keep `BUILD_MINIMAL=yes`; think twice before apt-installing anything heavy.
 
 ## Not ported (still in the SDK if ever needed)

@@ -42,6 +42,16 @@ Main() {
 	cp -rv /tmp/overlay/etc /
 	chmod +x /usr/local/bin/*	# a lost exec bit = 203/EXEC at boot
 
+	# Build-generated artifacts (audit 1.2/1.3): binaries with source in this
+	# repo are compiled here, never committed. Sources ship in the image under
+	# /usr/local/src so they can also be regenerated on-device.
+	echo "bit0: compiling pico8-stretch.so" >&2
+	apt-get -y -qq install --no-install-recommends gcc libc6-dev
+	gcc -O2 -shared -fPIC -o /usr/local/lib/pico8-stretch.so \
+		/usr/local/src/pico8-stretch.c -ldl
+	apt-get -y -qq purge gcc libc6-dev
+	apt-get -y -qq autoremove --purge
+
 	# PICO-8 is proprietary and gitignored: it ships in the image only when
 	# the builder has placed a licensed copy at overlay/root/pico-8/
 	# (see docs/PICO8.md). Otherwise install later via install-pico8.sh.
@@ -55,11 +65,14 @@ Main() {
 		echo "bit0: no pico-8 in overlay, skipping (docs/PICO8.md)" >&2
 	fi
 
-	# Panel init firmware: explicit install (a bare 'cp -r .../lib /' proved
-	# unreliable with the usrmerge /lib symlink), and fail the build loudly
-	# if it's missing — without it the display driver cannot start.
-	install -D -m 0644 "/tmp/overlay/lib/firmware/bit0,ili9341.bin" \
-		"/usr/lib/firmware/bit0,ili9341.bin"
+	# Panel init firmware: generated from source (mipi-dbi-cmd format), and
+	# fail the build loudly if it's missing — without it the display driver
+	# cannot start.
+	echo "bit0: generating panel firmware" >&2
+	install -d /usr/lib/firmware
+	python3 /usr/local/src/panel-firmware/mipi-dbi-cmd \
+		"/usr/lib/firmware/bit0,ili9341.bin" \
+		"/usr/local/src/panel-firmware/bit0,ili9341.txt"
 	[ -f "/usr/lib/firmware/bit0,ili9341.bin" ] || {
 		echo "bit0: FATAL: panel firmware missing" >&2
 		exit 1

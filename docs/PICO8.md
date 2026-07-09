@@ -45,15 +45,18 @@ is a DRM device (`panel-mipi-dbi`). The chain that works:
 
 3. **`pico8-stretch.so` (LD_PRELOAD).** The surviving path integer-scales:
    on a 240-px-tall panel that's 1× = a tiny 128×128 square. The shim
-   (source: `scripts/pico8-stretch.c`) intercepts `SDL_RenderCopy` and
-   rewrites the destination rect of pico-8's 128×128 back-page texture.
-   Geometry comes from `PICO8_DRAW_RECT` ("x,y,w,h"):
+   (source: `userpatches/overlay/usr/local/src/pico8-stretch.c`) intercepts
+   `SDL_RenderCopy` and rewrites the destination rect of pico-8's 128×128
+   back-page texture. Geometry comes from `PICO8_DRAW_RECT` ("x,y,w,h"):
    - default `40,0,240,240` — square pixels, centered, thin side bars
    - `0,0,320,240` — full-stretch (slightly wide pixels)
    Set it in `pico8-launch` or the environment to taste.
 
-   Rebuild the shim with any armhf gcc:
-   `arm-…-gcc -O2 -shared -fPIC -o pico8-stretch.so pico8-stretch.c -ldl`
+   The `.so` is never committed: `customize-image.sh` compiles it inside the
+   image chroot (gcc is installed for the build and purged again). The source
+   also ships on-device at `/usr/local/src/pico8-stretch.c`, so with gcc
+   installed it can be rebuilt there:
+   `gcc -O2 -shared -fPIC -o /usr/local/lib/pico8-stretch.so /usr/local/src/pico8-stretch.c -ldl`
 
 Audio goes through the asound.conf softvol chain (launcher VOL buttons and
 keyboard volume keys work inside pico-8). Input: the uinput keyboard/mouse
