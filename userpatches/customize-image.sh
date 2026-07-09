@@ -2,9 +2,16 @@
 # Armbian image customization hook — runs inside the target rootfs chroot.
 # Overlay files are available at /tmp/overlay.
 # Arguments: $1=RELEASE $2=LINUXFAMILY $3=BOARD $4=BUILD_DESKTOP
+# Fail the build on any error: a bootable image with silently missing
+# packages/files is worse than no image.
+set -euo pipefail
 
 RELEASE=$1
 BOARD=$3
+
+# Transplanted SDK adbd (see docs/BINARIES.md): verify provenance before it
+# ships — a corrupted or swapped binary must fail the build, not the device.
+ADBD_SHA256=e1a298ce71ed76c572ef87cea84e0f4c6a8f39079777dbcd0077cb4251b85e8f
 
 Main() {
 	[ "$BOARD" = "bit0" ] || return 0
@@ -23,6 +30,12 @@ Main() {
 	apt-get -y -qq install --no-install-recommends \
 		python3 python3-serial triggerhappy alsa-utils kbd libssl3t64 \
 		libsdl2-2.0-0 libgl1-mesa-dri libegl1 libgles2
+
+	echo "bit0: verifying adbd checksum" >&2
+	echo "$ADBD_SHA256  /tmp/overlay/usr/local/bin/adbd" | sha256sum -c - || {
+		echo "bit0: FATAL: adbd checksum mismatch (docs/BINARIES.md)" >&2
+		exit 1
+	}
 
 	echo "bit0: installing overlay files" >&2
 	cp -rv /tmp/overlay/usr /
