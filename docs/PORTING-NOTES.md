@@ -43,7 +43,8 @@ Where every piece of the bit0 came from, and what changed in the move.
 
 - **U-Boot**: `luckfox-lyra-rk3506_defconfig` is validated on the Lyra Plus, not the base Lyra. Watch the serial console (`ttyFIQ0`, 1500000 baud) on first boot.
 - **UART2 tty name**: the bridge expects `/dev/ttyS2`. Same kernel as the SDK so it should hold, but verify with `ls /dev/ttyS*` if the keyboard is dead.
-- **event device numbering**: `touch-mouse` grabs `/dev/input/event0` by default; Debian udev may order devices differently than Buildroot did.
+- **event device numbering**: resolved — `touch-mouse`/`touch-cal` find the touchscreen by device name (`ADS7846 Touchscreen`, override with `BIT0_TOUCH_NAME`), falling back to `event0` with a logged warning.
+- **first-boot touch**: no calibration ships in the image (panels vary per unit); `touch-mouse.service` stays off (`ConditionPathExists`) until the launcher's CALIBRATE entry writes `/etc/touch-mouse.cal`. Navigate the menu with the keyboard's UART mouse until then.
 - **fbcon**: `console=tty1 fbcon=font:VGA8x8` is in the DTS bootargs, but Armbian's boot.cmd/armbianEnv.txt may append its own `console=`. If the LCD console is missing, check `/boot/armbianEnv.txt` (`extraargs=fbcon=map:0 fbcon=font:VGA8x8`).
 - **Display flush rate**: the old driver throttled to 30 fps and tracked dirty lines; DRM flushes damage rects on demand instead. If touch feels starved under heavy screen updates, that's the shared-SPI contention to revisit (the ads7846 20 ms patch is the main mitigation).
 - **Panel init**: if colors/orientation are off, edit `bit0,ili9341.txt` (e.g. MADCTL `0x36`, inversion `0x20/0x21`) — source + compiler live in `userpatches/overlay/usr/local/src/panel-firmware/` and ship on-device at `/usr/local/src/panel-firmware/`, so regenerate with `python3 mipi-dbi-cmd /usr/lib/firmware/bit0,ili9341.bin bit0,ili9341.txt` right on the device — no kernel or image rebuild needed.

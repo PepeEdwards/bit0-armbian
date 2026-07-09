@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """ADS7846 touchscreen -> uinput absolute pointer ("touch acts as mouse").
 
-Reads raw events from /dev/input/event0 (grabbed, so nothing else sees the
-uncalibrated data), applies the affine calibration from /etc/touch-mouse.cal
+Reads raw events from the ADS7846 evdev node, resolved by device name
+(BIT0_TOUCH_NAME overrides; grabbed, so nothing else sees the uncalibrated
+data), applies the affine calibration from /etc/touch-mouse.cal
 (produced by touch-cal) and emits a clean absolute pointer device
 "Lyra Touch Mouse" with proper 0..W-1 / 0..H-1 ranges plus BTN_TOUCH.
 DirectFB/SDL then treat it as a touchscreen: cursor jumps to the touched
 point, press = left button.
 """
 
+import os
 import sys
 import time
 import fcntl
@@ -17,11 +19,23 @@ sys.path.insert(0, '/usr/local/lib')
 from bit0.evdev import (EV_SYN, EV_KEY, EV_ABS, SYN_REPORT,
                         ABS_X, ABS_Y, BTN_TOUCH,
                         EVENT_SIZE, EVIOCGRAB, send_event, unpack_event,
-                        fb_size)
+                        find_event, fb_size)
 from bit0.uinput import create_device
 
-EVDEV    = '/dev/input/event0'
-CAL_FILE = '/etc/touch-mouse.cal'
+# Resolve the touchscreen by device name: event node numbering is not stable
+# across kernels/udev. Falls back to event0 (the SDK-era assumption).
+TOUCH_NAME     = os.environ.get('BIT0_TOUCH_NAME', 'ADS7846 Touchscreen')
+EVDEV_FALLBACK = '/dev/input/event0'
+CAL_FILE       = '/etc/touch-mouse.cal'
+
+
+def resolve_evdev():
+    path = find_event(TOUCH_NAME)
+    if path:
+        return path
+    print(f'touch-mouse: no input device named {TOUCH_NAME!r}; '
+          f'falling back to {EVDEV_FALLBACK}', file=sys.stderr)
+    return EVDEV_FALLBACK
 
 # px of movement (post-calibration) to register as motion while held;
 # below this, a held finger's sample jitter is ignored so a tap = a point.
@@ -48,11 +62,12 @@ def create_uinput_pointer():
 
 
 def main():
+    evdev = resolve_evdev()
     try:
-        ev = open(EVDEV, 'rb', buffering=0)
+        ev = open(evdev, 'rb', buffering=0)
         fcntl.ioctl(ev, EVIOCGRAB, 1)  # raw events must not leak past us
     except OSError as exc:
-        print(f'touch-mouse: {EVDEV}: {exc}', file=sys.stderr)
+        print(f'touch-mouse: {evdev}: {exc}', file=sys.stderr)
         sys.exit(1)
 
     try:
@@ -61,7 +76,7 @@ def main():
         print(f'touch-mouse: uinput: {exc}', file=sys.stderr)
         sys.exit(1)
 
-    print(f'touch-mouse: {EVDEV} -> uinput ({W}x{H}) running', flush=True)
+    print(f'touch-mouse: {evdev} -> uinput ({W}x{H}) running', flush=True)
 
     def emit_pos(sx, sy):
         send_event(ufd, EV_ABS, ABS_X, sx)

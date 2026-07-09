@@ -15,6 +15,7 @@ Stop the touch-mouse daemon first (it grabs event0):
   /etc/init.d/S51touch-mouse stop && touch-cal && /etc/init.d/S51touch-mouse start
 """
 
+import os
 import struct
 import fcntl
 import select
@@ -26,9 +27,11 @@ from bit0.evdev import (EV_SYN, EV_KEY, EV_ABS, BTN_TOUCH, KEY_ESC,
                         EVENT_SIZE, EVIOCGRAB, unpack_event, find_event,
                         fb_size)
 
-EVDEV    = '/dev/input/event0'
-FBDEV    = '/dev/fb0'
-CAL_FILE = '/etc/touch-mouse.cal'
+# Same name-based resolution as touch-mouse (event numbering isn't stable).
+TOUCH_NAME = os.environ.get('BIT0_TOUCH_NAME', 'ADS7846 Touchscreen')
+EVDEV      = find_event(TOUCH_NAME) or '/dev/input/event0'
+FBDEV      = '/dev/fb0'
+CAL_FILE   = '/etc/touch-mouse.cal'
 
 W, H = fb_size()
 
