@@ -15,26 +15,22 @@ Stop the touch-mouse daemon first (it grabs event0):
   /etc/init.d/S51touch-mouse stop && touch-cal && /etc/init.d/S51touch-mouse start
 """
 
-import os
 import struct
 import fcntl
 import select
 import time
 import sys
 
+sys.path.insert(0, '/usr/local/lib')
+from bit0.evdev import (EV_SYN, EV_KEY, EV_ABS, BTN_TOUCH, KEY_ESC,
+                        EVENT_SIZE, EVIOCGRAB, unpack_event, find_event,
+                        fb_size)
+
 EVDEV    = '/dev/input/event0'
 FBDEV    = '/dev/fb0'
 CAL_FILE = '/etc/touch-mouse.cal'
 
-EVIOCGRAB = 0x40044590
-EV_SYN, EV_KEY, EV_ABS = 0x00, 0x01, 0x03
-BTN_TOUCH = 0x14a
-
-try:
-    with open('/sys/class/graphics/fb0/virtual_size') as f:
-        W, H = map(int, f.read().split(','))
-except OSError:
-    W, H = 320, 240
+W, H = fb_size()
 
 INSET = 30
 TARGETS = [(INSET, INSET), (W - 1 - INSET, INSET), (W - 1 - INSET, H - 1 - INSET),
@@ -71,27 +67,6 @@ def median(vals):
 ev = open(EVDEV, 'rb', buffering=0)
 fcntl.ioctl(ev, EVIOCGRAB, 1)  # sole consumer while calibrating
 
-KEY_ESC = 1
-
-
-def find_event(name):
-    base = '/sys/class/input'
-    try:
-        nodes = sorted(os.listdir(base))
-    except OSError:
-        return None
-    for n in nodes:
-        if not n.startswith('event'):
-            continue
-        try:
-            with open(f'{base}/{n}/device/name') as f:
-                if f.read().strip() == name:
-                    return f'/dev/input/{n}'
-        except OSError:
-            continue
-    return None
-
-
 kb = None
 kb_path = find_event('Lyra UART Keyboard')
 if kb_path:
@@ -116,18 +91,18 @@ def read_touch():
             clear()
             raise SystemExit('touch-cal: timeout waiting for touch')
         if kb in r:
-            d = kb.read(16)
-            if d and len(d) == 16:
-                _, _, kt, kc, kv = struct.unpack('llHHi', d)
+            d = kb.read(EVENT_SIZE)
+            if d and len(d) == EVENT_SIZE:
+                kt, kc, kv = unpack_event(d)
                 if kt == EV_KEY and kc == KEY_ESC and kv == 1:
                     clear()
                     raise SystemExit('touch-cal: cancelled (ESC)')
             if ev not in r:
                 continue
-        data = ev.read(16)
-        if len(data) < 16:
+        data = ev.read(EVENT_SIZE)
+        if len(data) < EVENT_SIZE:
             continue
-        _, _, t, c, v = struct.unpack('llHHi', data)
+        t, c, v = unpack_event(data)
         if t == EV_ABS and c == 0:
             x = v
         elif t == EV_ABS and c == 1:

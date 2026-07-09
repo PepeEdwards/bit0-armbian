@@ -9,29 +9,19 @@ DirectFB/SDL then treat it as a touchscreen: cursor jumps to the touched
 point, press = left button.
 """
 
-import os
 import sys
 import time
-import struct
 import fcntl
+
+sys.path.insert(0, '/usr/local/lib')
+from bit0.evdev import (EV_SYN, EV_KEY, EV_ABS, SYN_REPORT,
+                        ABS_X, ABS_Y, BTN_TOUCH,
+                        EVENT_SIZE, EVIOCGRAB, send_event, unpack_event,
+                        fb_size)
+from bit0.uinput import create_device
 
 EVDEV    = '/dev/input/event0'
 CAL_FILE = '/etc/touch-mouse.cal'
-UINPUT   = '/dev/uinput'
-
-EVIOCGRAB = 0x40044590
-
-# uinput ioctls (ARM 32-bit Linux)
-UI_SET_EVBIT  = 0x40045564
-UI_SET_KEYBIT = 0x40045565
-UI_SET_ABSBIT = 0x40045567
-UI_DEV_CREATE = 0x5501
-
-EV_SYN, EV_KEY, EV_ABS = 0x00, 0x01, 0x03
-SYN_REPORT = 0
-BUS_USB    = 0x03
-BTN_TOUCH  = 0x14a
-ABS_X, ABS_Y = 0x00, 0x01
 
 # px of movement (post-calibration) to register as motion while held;
 # below this, a held finger's sample jitter is ignored so a tap = a point.
@@ -42,11 +32,7 @@ TOUCH_DEADZONE = 4
 # least once before the button engages -> a tap is a point, not a drag line.
 PRESS_SETTLE = 0.06
 
-try:
-    with open('/sys/class/graphics/fb0/virtual_size') as f:
-        W, H = map(int, f.read().split(','))
-except OSError:
-    W, H = 320, 240
+W, H = fb_size()
 
 try:
     a, b, c, d, e, f_ = map(float, open(CAL_FILE).read().split())
@@ -57,29 +43,8 @@ except (OSError, ValueError):
 
 
 def create_uinput_pointer():
-    os.system('modprobe uinput 2>/dev/null')
-    fd = os.open(UINPUT, os.O_WRONLY | os.O_NONBLOCK)
-    fcntl.ioctl(fd, UI_SET_EVBIT, EV_KEY)
-    fcntl.ioctl(fd, UI_SET_KEYBIT, BTN_TOUCH)
-    fcntl.ioctl(fd, UI_SET_EVBIT, EV_ABS)
-    fcntl.ioctl(fd, UI_SET_ABSBIT, ABS_X)
-    fcntl.ioctl(fd, UI_SET_ABSBIT, ABS_Y)
-    absmax = [0] * 64
-    absmax[ABS_X] = W - 1
-    absmax[ABS_Y] = H - 1
-    name = b'Lyra Touch Mouse' + b'\x00' * 64
-    # struct uinput_user_dev: name[80], input_id, ff_effects_max,
-    #                         absmax[64], absmin[64], absfuzz[64], absflat[64]
-    uud = struct.pack('80sHHHHI' + '64i' * 4,
-                      name, BUS_USB, 0x1234, 0x567A, 1, 0,
-                      *(absmax + [0] * 192))
-    os.write(fd, uud)
-    fcntl.ioctl(fd, UI_DEV_CREATE)
-    return fd
-
-
-def send_event(fd, ev_type, code, value):
-    os.write(fd, struct.pack('llHHi', 0, 0, ev_type, code, value))
+    return create_device('Lyra Touch Mouse', 0x567A, keys=(BTN_TOUCH,),
+                         abs_max={ABS_X: W - 1, ABS_Y: H - 1})
 
 
 def main():
@@ -109,10 +74,10 @@ def main():
     armed_at = None            # monotonic time the cursor reached the touch pt
     last_sx = last_sy = None   # last emitted screen position
     while True:
-        data = ev.read(16)
-        if len(data) < 16:
+        data = ev.read(EVENT_SIZE)
+        if len(data) < EVENT_SIZE:
             continue
-        _, _, t, code, v = struct.unpack('llHHi', data)
+        t, code, v = unpack_event(data)
 
         if t == EV_ABS and code == ABS_X:
             x = v

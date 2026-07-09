@@ -19,11 +19,12 @@ import shutil
 import subprocess
 import time
 
-FBDEV = '/dev/fb0'
+sys.path.insert(0, '/usr/local/lib')
+from bit0.evdev import (EV_SYN, EV_KEY, EV_REL, EV_ABS,
+                        REL_X, REL_Y, ABS_X, ABS_Y, BTN_LEFT, BTN_TOUCH,
+                        EVENT_SIZE, unpack_event, find_event, fb_size)
 
-EV_SYN, EV_KEY, EV_REL, EV_ABS = 0x00, 0x01, 0x02, 0x03
-REL_X, REL_Y, ABS_X, ABS_Y = 0, 1, 0, 1
-BTN_LEFT, BTN_TOUCH = 0x110, 0x14a
+FBDEV = '/dev/fb0'
 
 MOUSE_NAME = 'Lyra UART Mouse'
 TOUCH_NAME = 'Lyra Touch Mouse'
@@ -151,11 +152,7 @@ BACK_ICON = [
 
 class Screen:
     def __init__(self):
-        try:
-            with open('/sys/class/graphics/fb0/virtual_size') as f:
-                self.w, self.h = map(int, f.read().split(','))
-        except OSError:
-            self.w, self.h = 320, 240
+        self.w, self.h = fb_size()
         self.fb = open(FBDEV, 'r+b', buffering=0)
         self.scene = bytearray(self.w * self.h * 2)
 
@@ -215,24 +212,6 @@ class Screen:
     def erase_cursor(self, cx, cy):
         self.flush(cx, min(cy, self.h - 1),
                    min(CUR_W, self.w - cx), min(CUR_H, self.h - cy))
-
-
-def find_event(name):
-    base = '/sys/class/input'
-    try:
-        nodes = sorted(os.listdir(base))
-    except OSError:
-        return None
-    for n in nodes:
-        if not n.startswith('event'):
-            continue
-        try:
-            with open(f'{base}/{n}/device/name') as f:
-                if f.read().strip() == name:
-                    return f'/dev/input/{n}'
-        except OSError:
-            continue
-    return None
 
 
 def open_inputs():
@@ -759,15 +738,15 @@ def main():
             kind = devs[f]
             while True:  # drain everything queued on this fd
                 try:
-                    data = f.read(16)
+                    data = f.read(EVENT_SIZE)
                 except OSError:
                     data = b''
                 if data is None:        # EAGAIN - queue empty
                     break
-                if len(data) < 16:      # device went away (daemon restart)
+                if len(data) < EVENT_SIZE:  # device went away (daemon restart)
                     lost = True
                     break
-                _, _, t, code, v = struct.unpack('llHHi', data)
+                t, code, v = unpack_event(data)
                 if kind == 'mouse':
                     if t == EV_REL and code == REL_X:
                         cx += v

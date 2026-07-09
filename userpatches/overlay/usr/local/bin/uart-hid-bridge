@@ -25,9 +25,15 @@ import fcntl
 import time
 import serial
 
+sys.path.insert(0, '/usr/local/lib')
+from bit0.evdev import (EV_SYN, EV_KEY, EV_REL, SYN_REPORT,
+                        REL_X, REL_Y, REL_WHEEL, REL_HWHEEL,
+                        BTN_LEFT, BTN_RIGHT, BTN_MIDDLE, BTN_SIDE, BTN_EXTRA,
+                        send_event)
+from bit0.uinput import create_device
+
 UART_DEV        = "/dev/ttyS2"
 UART_BAUD       = 115200
-UINPUT          = "/dev/uinput"
 MAGIC           = 0xAA
 TYPE_KBD        = 0x01
 TYPE_NKRO       = 0x02
@@ -41,29 +47,6 @@ READY_INTERVAL  = 5.0
 # OUT2 must be asserted so the dw-apb-uart interrupt output reaches the GIC.
 TIOCMBIS   = 0x5416
 TIOCM_OUT2 = 0x4000
-
-# uinput ioctls (ARM 32-bit Linux)
-UI_SET_EVBIT  = 0x40045564
-UI_SET_KEYBIT = 0x40045565
-UI_SET_RELBIT = 0x40045566
-UI_DEV_CREATE = 0x5501
-
-EV_SYN    = 0x00
-EV_KEY    = 0x01
-EV_REL    = 0x02
-SYN_REPORT = 0
-BUS_USB   = 0x03
-
-REL_X      = 0x00
-REL_Y      = 0x01
-REL_HWHEEL = 0x06
-REL_WHEEL  = 0x08
-
-BTN_LEFT   = 0x110
-BTN_RIGHT  = 0x111
-BTN_MIDDLE = 0x112
-BTN_SIDE   = 0x113
-BTN_EXTRA_ = 0x114   # trailing _ to avoid shadowing builtin
 
 # HID keycode → Linux evdev keycode (usage page 0x07)
 HID_TO_LINUX = [
@@ -125,43 +108,17 @@ VOL_CMDS = {
 }
 
 
-def send_event(fd, ev_type, code, value):
-    # struct input_event: timeval(2×long=8B) + type(u16) + code(u16) + value(s32)
-    os.write(fd, struct.pack('llHHi', 0, 0, ev_type, code, value))
-
-
 def create_uinput_keyboard():
-    os.system('modprobe uinput 2>/dev/null')
-    fd = os.open(UINPUT, os.O_WRONLY | os.O_NONBLOCK)
-    fcntl.ioctl(fd, UI_SET_EVBIT, EV_SYN)
-    fcntl.ioctl(fd, UI_SET_EVBIT, EV_KEY)
-    for k in range(256):
-        fcntl.ioctl(fd, UI_SET_KEYBIT, k)
-    name = b'Lyra UART Keyboard' + b'\x00' * 62
-    uud = struct.pack('80sHHHHI' + '64i' * 4,
-                      name, BUS_USB, 0x1234, 0x5678, 1, 0,
-                      *([0] * 256))
-    os.write(fd, uud)
-    fcntl.ioctl(fd, UI_DEV_CREATE)
+    fd = create_device('Lyra UART Keyboard', 0x5678, keys=range(256))
     time.sleep(0.5)
     return fd
 
 
 def create_uinput_mouse():
-    fd = os.open(UINPUT, os.O_WRONLY | os.O_NONBLOCK)
-    fcntl.ioctl(fd, UI_SET_EVBIT, EV_SYN)
-    fcntl.ioctl(fd, UI_SET_EVBIT, EV_KEY)
-    for btn in (BTN_LEFT, BTN_RIGHT, BTN_MIDDLE, BTN_SIDE, BTN_EXTRA_):
-        fcntl.ioctl(fd, UI_SET_KEYBIT, btn)
-    fcntl.ioctl(fd, UI_SET_EVBIT, EV_REL)
-    for rel in (REL_X, REL_Y, REL_WHEEL, REL_HWHEEL):
-        fcntl.ioctl(fd, UI_SET_RELBIT, rel)
-    name = b'Lyra UART Mouse' + b'\x00' * 65
-    uud = struct.pack('80sHHHHI' + '64i' * 4,
-                      name, BUS_USB, 0x1234, 0x5679, 1, 0,
-                      *([0] * 256))
-    os.write(fd, uud)
-    fcntl.ioctl(fd, UI_DEV_CREATE)
+    fd = create_device('Lyra UART Mouse', 0x5679,
+                       keys=(BTN_LEFT, BTN_RIGHT, BTN_MIDDLE,
+                             BTN_SIDE, BTN_EXTRA),
+                       rels=(REL_X, REL_Y, REL_WHEEL, REL_HWHEEL))
     time.sleep(0.5)
     return fd
 
