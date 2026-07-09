@@ -7,14 +7,13 @@
 #
 #   ./scripts/install-pico8.sh /path/to/unpacked/pico-8
 #
-# With no argument it uses the copy in the old Luckfox SDK overlay (pepe's
-# machine). Needs pico8_dyn + pico8.dat; carts/ and config.txt come along
-# if present. Works from WSL (adb.exe interop) or any Linux with adb.
+# The path may also come from the PICO8_SRC environment variable. Needs
+# pico8_dyn + pico8.dat; carts/ and config.txt come along if present.
+# Works from WSL (adb.exe interop) or any Linux with adb.
 set -euo pipefail
 
-SDK_PICO8=/home/<user>/Lyra-sdk/buildroot/board/rockchip/rk3506/spi-display-overlay/root/pico-8
-SRC="${1:-$SDK_PICO8}"
-[ -d "$SRC" ] || { echo "usage: install-pico8.sh /path/to/pico-8 (dir with pico8_dyn + pico8.dat)" >&2; exit 1; }
+SRC="${1:-${PICO8_SRC:-}}"
+[ -n "$SRC" ] && [ -d "$SRC" ] || { echo "usage: install-pico8.sh /path/to/pico-8 (dir with pico8_dyn + pico8.dat; or set PICO8_SRC)" >&2; exit 1; }
 
 ADB=adb
 command -v adb >/dev/null 2>&1 || ADB=adb.exe
