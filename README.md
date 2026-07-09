@@ -40,6 +40,14 @@ Windows side first if you flash from there. Serial console for debugging:
 Note: always clone/build on the Linux filesystem (`~`), never under `/mnt/c` —
 the rootfs build needs real ext4 semantics and 9P is painfully slow.
 
+## Security posture
+
+This is a development handheld: the USB OTG port runs an **unauthenticated
+adb daemon as root** — anyone with a cable gets a root shell. That's
+intentional (it replaces the old serial console). To disable it, create
+`/boot/bit0-no-adb` on the device and reboot. Provenance and checksum of the
+adbd binary are recorded in `docs/BINARIES.md` and verified at image build.
+
 ## Origin
 
 Ported from the private Luckfox Buildroot SDK. See `docs/PORTING-NOTES.md` for

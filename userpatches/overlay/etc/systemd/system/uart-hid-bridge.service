@@ -7,6 +7,12 @@ Wants=dev-ttyS2.device
 ExecStart=/usr/local/bin/uart-hid-bridge
 Restart=always
 RestartSec=1
+# Needs root for /dev/uinput + the UART, but never touches /root or gains
+# privileges.
+NoNewPrivileges=yes
+ProtectHome=yes
+# Hardware identity override (default lives in the daemon):
+#Environment=BIT0_UART=/dev/ttyS2
 
 [Install]
 WantedBy=multi-user.target

@@ -1,8 +1,16 @@
 #!/bin/bash
 # Bit0 USB gadget: ADB over the OTG port, like the Luckfox SDK image.
 # configfs composite gadget with a single functionfs function running the
-# Rockchip/Buildroot adbd binary (glibc armhf, transplanted from the SDK).
+# Rockchip/Buildroot adbd binary (see docs/BINARIES.md).
+#
+# SECURITY: this adbd performs no authentication — any USB host gets a root
+# shell. Intended dev posture; opt out by creating /boot/bit0-no-adb.
 set -e
+
+if [ -e /boot/bit0-no-adb ]; then
+	echo "bit0-usb-gadget: /boot/bit0-no-adb present, adb disabled" >&2
+	exit 0
+fi
 
 G=/sys/kernel/config/usb_gadget/bit0
 
@@ -21,7 +29,12 @@ if [ ! -d "$G" ]; then
 	mkdir -p strings/0x409
 	echo "Bit0"          > strings/0x409/manufacturer
 	echo "Bit0 Handheld" > strings/0x409/product
-	echo "bit0-0001"     > strings/0x409/serialnumber
+	# Per-unit serial so two devices on one host don't collide in adb:
+	# SoC serial from DT, else machine-id, else the old fixed string.
+	SERIAL=$(tr -d '\0' < /proc/device-tree/serial-number 2>/dev/null || true)
+	[ -n "$SERIAL" ] || SERIAL=$(cut -c1-16 /etc/machine-id 2>/dev/null || true)
+	[ -n "$SERIAL" ] || SERIAL="bit0-0001"
+	echo "$SERIAL"       > strings/0x409/serialnumber
 	mkdir -p configs/b.1/strings/0x409
 	echo "adb" > configs/b.1/strings/0x409/configuration
 	echo 500   > configs/b.1/MaxPower

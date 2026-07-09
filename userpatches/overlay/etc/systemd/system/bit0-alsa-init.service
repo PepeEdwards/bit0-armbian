@@ -7,6 +7,8 @@ Before=triggerhappy.service bit0-launcher.service
 Type=oneshot
 ExecStart=/usr/local/bin/bit0-alsa-init
 RemainAfterExit=yes
+NoNewPrivileges=yes
+ProtectHome=yes
 
 [Install]
 WantedBy=multi-user.target

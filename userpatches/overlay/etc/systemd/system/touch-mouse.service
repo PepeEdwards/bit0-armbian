@@ -8,6 +8,12 @@ ConditionPathExists=/etc/touch-mouse.cal
 ExecStart=/usr/local/bin/touch-mouse
 Restart=always
 RestartSec=1
+# Needs root for /dev/uinput + the evdev grab, but never touches /root or
+# gains privileges.
+NoNewPrivileges=yes
+ProtectHome=yes
+# Hardware identity override (default lives in the daemon):
+#Environment=BIT0_TOUCH_NAME=ADS7846 Touchscreen
 
 [Install]
 WantedBy=multi-user.target
