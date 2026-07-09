@@ -14,7 +14,7 @@ Main() {
 	# python3-serial: uart-hid-bridge; kbd: openvt/chvt for the launcher's
 	# TERMINAL entry; triggerhappy: volume/power hotkeys; alsa-utils: amixer;
 	# libssl3t64: libcrypto.so.3 for the transplanted SDK adbd binary;
-	# libsdl2: for PICO-8/retroarch (installed separately, see docs/PICO8.md).
+	# libsdl2: for PICO-8 (installed separately, see docs/PICO8.md).
 	# mesa/EGL/GLES: the RK3506 has no GPU — SDL2's kmsdrm backend cannot
 	# present frames without EGL (verified on hardware: pico-8 ran with audio
 	# but the plane kept scanning fbcon's framebuffer, and its rpi blit path

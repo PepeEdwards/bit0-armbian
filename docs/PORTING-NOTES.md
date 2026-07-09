@@ -53,5 +53,4 @@ Where every piece of the bit0 came from, and what changed in the move.
 
 - `custom_driver/i2c_keyboard/` + `lyra_i2c_keyboard.c` (I2C keyboard path)
 - `ili9488_fb.c` (unused display variant)
-- RetroArch/GBA integration (launcher's GBA menu will report missing BIOS/binary)
 - `fs-overlay/` RkLunch hooks, PulseAudio config

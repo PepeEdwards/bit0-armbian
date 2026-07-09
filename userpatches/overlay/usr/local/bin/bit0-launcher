@@ -260,12 +260,6 @@ def close_inputs(devs):
 
 # ── apps ─────────────────────────────────────────────────────────────────────
 
-RETROARCH = '/usr/bin/retroarch'
-GBA_CORE = '/usr/lib/libretro/gpsp_libretro.so'
-ROM_DIR = '/root/roms'
-# gpSP refuses to run without a real GBA BIOS in the retroarch system dir.
-GBA_BIOS = '/root/.config/retroarch/system/gba_bios.bin'
-
 # ── SPI SD card (on-demand) ───────────────────────────────────────────────────
 # The SD slot sits on spi0 (CS2) sharing the bus with the display+touch. Leaving
 # mmc_spi bound makes it poll the card forever and stall the bus (display freeze),
@@ -443,25 +437,6 @@ def run_sdcard(scr):
     run_pico8_cart(cached[0])                 # extra carts stay in SD_CACHE
 
 
-def run_gba(rom):
-    _kill_stale('retroarch')
-    # key bindings live in /root/.config/retroarch/retroarch.cfg
-    subprocess.call([RETROARCH, '-L', GBA_CORE, rom],
-                    env=dict(os.environ, HOME='/root',
-                             SDL_VIDEODRIVER='kmsdrm',
-                             SDL_AUDIODRIVER='alsa'))
-
-
-def gba_launch(scr, rom):
-    # gpSP can't boot without the BIOS; show a clear message instead of a
-    # silent flash back to the menu.
-    if not os.path.exists(GBA_BIOS):
-        fullscreen_message(scr, 'GBA BIOS MISSING')
-        time.sleep(2.5)
-        return
-    run_gba(rom)
-
-
 def run_calibrate():
     subprocess.call('systemctl stop touch-mouse; '
                     '/usr/local/bin/touch-cal; '
@@ -583,7 +558,6 @@ VOLROW_Y, VOLROW_H = SLIDER_Y + SLIDER_H + 18, 30
 def make_pages(scr):
     main = column(scr, [('TERMINAL', {'app': run_terminal}),
                         ('PICO-8', {'app': (lambda: run_pico8(scr))}),
-                        ('GBA', {'goto': 'gba'}),
                         ('SD CARD', {'app': (lambda: run_sdcard(scr))})])
     main.append({'label': '', 'icon': GEAR_ICON, 'goto': 'settings',
                  'x': scr.w - 36, 'y': 6, 'w': 30, 'h': 26})
@@ -639,24 +613,6 @@ def draw_slider(scr, b, hover, flush=True):
              by + (bh - GLYPH_H * 2) // 2, 2, C_TEXT)
     if flush:
         scr.flush(bx, by - 18, bw + 4, bh + 24)
-
-
-def make_gba_page(scr):
-    """Built on entry so newly added ROMs show up without a restart. Scans
-    /root/roms recursively (ROMs are often dropped in a /root/roms/gba subdir)."""
-    roms = []
-    for root, _dirs, files in os.walk(ROM_DIR):
-        for f in files:
-            if f.lower().endswith(('.gba', '.zip')):
-                roms.append(os.path.join(root, f))
-    roms.sort(key=lambda p: os.path.basename(p).lower())
-    entries = [(os.path.splitext(os.path.basename(p))[0].upper()[:21],
-                {'app': (lambda q=p: gba_launch(scr, q))})
-               for p in roms[:4]]
-    if not roms:
-        entries = [('NO ROMS IN /ROOT/ROMS', {})]
-    entries.append(('BACK', {'goto': 'main'}))
-    return column(scr, entries)
 
 
 def draw_button(scr, b, hover, flush=True):
@@ -749,7 +705,7 @@ def main():
     sd_release()
     # Clear any app orphaned by a previous launcher restart still holding the
     # single-stream audio amp (would mute the next launch).
-    _kill_stale('pico8_dyn', 'retroarch')
+    _kill_stale('pico8_dyn')
     # keep fbcon from blinking its cursor over our pixels
     try:
         with open('/sys/class/graphics/fbcon/cursor_blink', 'w') as f:
@@ -884,8 +840,6 @@ def main():
             b = btns[hover]
             if 'goto' in b:
                 page = b['goto']
-                if page == 'gba':
-                    pages['gba'] = make_gba_page(scr)
                 btns = pages[page]
                 hover = -1
             elif 'cmd' in b:
@@ -915,7 +869,7 @@ def main():
                 hover = -1
                 ax = ay = None
             else:
-                clicked = False  # inert button (e.g. "NO ROMS")
+                clicked = False  # inert button (no action keys)
             if clicked:
                 draw_page(scr, page, btns, hover)
                 scr.draw_cursor(cx, cy)
