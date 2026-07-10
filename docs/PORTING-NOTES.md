@@ -31,7 +31,7 @@ Where every piece of the bit0 came from, and what changed in the move.
 | `S09spi-display` (insmod ili9341_fb.ko) | gone — `panel_mipi_dbi` autoloads via DT; also listed in `modules-load.d/bit0.conf` |
 | `S49hidg` (modprobe uinput) | `modules-load.d/bit0.conf` |
 | `S50uart-hid` | `uart-hid-bridge.service` |
-| `S51touch-mouse` | `touch-mouse.service` (`ConditionPathExists=/etc/touch-mouse.cal`) |
+| `S51touch-mouse` | `touch-mouse.service` (nominal default cal until CALIBRATE writes `/etc/touch-mouse.cal`) |
 | `S52triggerhappy` | Debian's own `triggerhappy.service`; confs moved to `/etc/triggerhappy/triggers.d/` |
 | `S99bit0-launcher` respawn loop | `bit0-launcher.service` with `Restart=always`; `getty@tty1` disabled (launcher owns tty1; serial getty on ttyFIQ0 remains) |
 | `lyra-volume-handler` Buildroot package | dropped — duplicate of the triggerhappy audio conf |
@@ -44,7 +44,7 @@ Where every piece of the bit0 came from, and what changed in the move.
 - **U-Boot**: `luckfox-lyra-rk3506_defconfig` is validated on the Lyra Plus, not the base Lyra. Watch the serial console (`ttyFIQ0`, 1500000 baud) on first boot.
 - **UART2 tty name**: the bridge expects `/dev/ttyS2`. Same kernel as the SDK so it should hold, but verify with `ls /dev/ttyS*` if the keyboard is dead.
 - **event device numbering**: resolved — `touch-mouse`/`touch-cal` find the touchscreen by device name (`ADS7846 Touchscreen`, override with `BIT0_TOUCH_NAME`), falling back to `event0` with a logged warning.
-- **first-boot touch**: no calibration ships in the image (panels vary per unit); `touch-mouse.service` stays off (`ConditionPathExists`) until the launcher's CALIBRATE entry writes `/etc/touch-mouse.cal`. Navigate the menu with the keyboard's UART mouse until then.
+- **first-boot touch**: no per-unit calibration ships in the image (panels vary a few percent), but `touch-mouse` starts with a rounded nominal transform (`DEFAULT_CAL` in the daemon) so touch works out of the box. The launcher's CALIBRATE entry writes `/etc/touch-mouse.cal`, which takes precedence for per-unit accuracy.
 - **fbcon**: `console=tty1 fbcon=font:VGA8x8` is in the DTS bootargs, but Armbian's boot.cmd/armbianEnv.txt may append its own `console=`. If the LCD console is missing, check `/boot/armbianEnv.txt` (`extraargs=fbcon=map:0 fbcon=font:VGA8x8`).
 - **Display flush rate**: the old driver throttled to 30 fps and tracked dirty lines; DRM flushes damage rects on demand instead. If touch feels starved under heavy screen updates, that's the shared-SPI contention to revisit (the ads7846 20 ms patch is the main mitigation).
 - **Panel init**: if colors/orientation are off, edit `bit0,ili9341.txt` (e.g. MADCTL `0x36`, inversion `0x20/0x21`) — source + compiler live in `userpatches/overlay/usr/local/src/panel-firmware/` and ship on-device at `/usr/local/src/panel-firmware/`, so regenerate with `python3 mipi-dbi-cmd /usr/lib/firmware/bit0,ili9341.bin bit0,ili9341.txt` right on the device — no kernel or image rebuild needed.

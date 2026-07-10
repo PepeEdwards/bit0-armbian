@@ -4,10 +4,13 @@
 Reads raw events from the ADS7846 evdev node, resolved by device name
 (BIT0_TOUCH_NAME overrides; grabbed, so nothing else sees the uncalibrated
 data), applies the affine calibration from /etc/touch-mouse.cal
-(produced by touch-cal) and emits a clean absolute pointer device
-"Lyra Touch Mouse" with proper 0..W-1 / 0..H-1 ranges plus BTN_TOUCH.
-DirectFB/SDL then treat it as a touchscreen: cursor jumps to the touched
-point, press = left button.
+(produced by touch-cal; a rounded nominal DEFAULT_CAL is used until that
+file exists) and emits a clean absolute pointer device
+"Lyra Touch Mouse" with proper 0..W-1 / 0..H-1 ranges plus BTN_TOUCH and
+BTN_LEFT. BTN_LEFT makes SDL2 classify the device as a mouse (not a
+touchscreen) so PICO-8's SDL mouse() API receives click events; the launcher
+reads BTN_TOUCH directly via evdev and is unaffected. Coordinate remapping
+for the pico8-stretch shim is handled in pico8-stretch.so (SDL level).
 """
 
 import os
@@ -17,7 +20,7 @@ import fcntl
 
 sys.path.insert(0, '/usr/local/lib')
 from bit0.evdev import (EV_SYN, EV_KEY, EV_ABS, SYN_REPORT,
-                        ABS_X, ABS_Y, BTN_TOUCH,
+                        ABS_X, ABS_Y, BTN_TOUCH, BTN_LEFT,
                         EVENT_SIZE, EVIOCGRAB, send_event, unpack_event,
                         find_event, fb_size)
 from bit0.uinput import create_device
@@ -41,6 +44,17 @@ def resolve_evdev():
 # below this, a held finger's sample jitter is ignored so a tap = a point.
 TOUCH_DEADZONE = 4
 
+# seconds of samples to collect on a new contact before placing the cursor,
+# at their median. The first ADS7846 pen-down samples are the noisiest, and
+# one PICO-8 canvas pixel is only ~2 screen px (240px draw rect / 128px
+# canvas), so trusting the first sample lands each tap +-1 canvas pixel.
+# ~2-3 samples at the ads7846 20 ms poll period.
+SAMPLE_WINDOW = 0.04
+
+
+def _median(vals):
+    return sorted(vals)[len(vals) // 2]
+
 # seconds to hold the cursor at the touch point (button up) before pressing,
 # so a polled app (PICO-8 ~30fps = 33ms/frame) samples the new position at
 # least once before the button engages -> a tap is a point, not a drag line.
@@ -48,16 +62,23 @@ PRESS_SETTLE = 0.06
 
 W, H = fb_size()
 
+# Nominal calibration for the stock panel stack (ADS7846 on the rotated
+# ILI9341: axes swapped, no inversion), rounded from a reference unit. Good
+# enough for menu taps out of the box; panels vary a few percent, so the
+# launcher's CALIBRATE entry (-> touch-cal -> CAL_FILE) replaces it with
+# per-unit values. Never bake measured per-unit numbers here (audit 2.2).
+DEFAULT_CAL = (0.0, 0.09, -36.0, 0.065, 0.0, -15.0)
+
 try:
     a, b, c, d, e, f_ = map(float, open(CAL_FILE).read().split())
 except (OSError, ValueError):
-    print(f'touch-mouse: missing or invalid {CAL_FILE}; run touch-cal first',
-          file=sys.stderr)
-    sys.exit(1)
+    a, b, c, d, e, f_ = DEFAULT_CAL
+    print(f'touch-mouse: no {CAL_FILE}; using nominal default calibration '
+          f'(run CALIBRATE for accuracy)', file=sys.stderr)
 
 
 def create_uinput_pointer():
-    return create_device('Lyra Touch Mouse', 0x567A, keys=(BTN_TOUCH,),
+    return create_device('Lyra Touch Mouse', 0x567A, keys=(BTN_TOUCH, BTN_LEFT),
                          abs_max={ABS_X: W - 1, ABS_Y: H - 1})
 
 
@@ -88,6 +109,8 @@ def main():
     pending = False            # contact detected, not yet pressed
     armed_at = None            # monotonic time the cursor reached the touch pt
     last_sx = last_sy = None   # last emitted screen position
+    samples = []               # (sx, sy) collected during SAMPLE_WINDOW
+    contact_at = None          # monotonic time of the first sample of a contact
     while True:
         data = ev.read(EVENT_SIZE)
         if len(data) < EVENT_SIZE:
@@ -104,19 +127,32 @@ def main():
             else:
                 if touching:
                     send_event(ufd, EV_KEY, BTN_TOUCH, 0)
+                    send_event(ufd, EV_KEY, BTN_LEFT, 0)
                     send_event(ufd, EV_SYN, SYN_REPORT, 0)
-                elif pending and armed_at is not None and last_sx is not None:
-                    # Released during the settle window (a fast tap): the app
+                elif pending:
+                    # Released before the press engaged (a fast tap): the app
                     # never saw the press yet, so synthesize a full click at
-                    # the touch point right here.
-                    emit_pos(last_sx, last_sy)
-                    send_event(ufd, EV_KEY, BTN_TOUCH, 1)
-                    send_event(ufd, EV_SYN, SYN_REPORT, 0)
-                    send_event(ufd, EV_KEY, BTN_TOUCH, 0)
-                    send_event(ufd, EV_SYN, SYN_REPORT, 0)
+                    # the best position estimate we have.
+                    if samples:                     # still in the sample window
+                        tap = (_median([p[0] for p in samples]),
+                               _median([p[1] for p in samples]))
+                    elif armed_at is not None and last_sx is not None:
+                        tap = (last_sx, last_sy)    # in the settle window
+                    else:
+                        tap = None                  # no position seen: drop
+                    if tap:
+                        emit_pos(*tap)
+                        send_event(ufd, EV_KEY, BTN_TOUCH, 1)
+                        send_event(ufd, EV_KEY, BTN_LEFT, 1)
+                        send_event(ufd, EV_SYN, SYN_REPORT, 0)
+                        send_event(ufd, EV_KEY, BTN_TOUCH, 0)
+                        send_event(ufd, EV_KEY, BTN_LEFT, 0)
+                        send_event(ufd, EV_SYN, SYN_REPORT, 0)
                 touching = False
                 pending = False
                 armed_at = None
+                samples = []
+                contact_at = None
         elif t == EV_SYN and x is not None and y is not None:
             sx = int(a * x + b * y + c)
             sy = int(d * x + e * y + f_)
@@ -133,9 +169,20 @@ def main():
                 # cart samples the new position (button up) for at least one
                 # frame first, so the press registers as a point, not a drag.
                 if armed_at is None:
-                    emit_pos(sx, sy)
-                    last_sx, last_sy = sx, sy
-                    armed_at = time.monotonic()
+                    # New contact: collect SAMPLE_WINDOW worth of samples and
+                    # place the cursor at their median — the first pen-down
+                    # samples jitter by a couple of pixels.
+                    samples.append((sx, sy))
+                    if contact_at is None:
+                        contact_at = time.monotonic()
+                    elif time.monotonic() - contact_at >= SAMPLE_WINDOW:
+                        sx = _median([p[0] for p in samples])
+                        sy = _median([p[1] for p in samples])
+                        emit_pos(sx, sy)
+                        last_sx, last_sy = sx, sy
+                        armed_at = time.monotonic()
+                        samples = []
+                        contact_at = None
                 else:
                     if (abs(sx - last_sx) >= TOUCH_DEADZONE or
                             abs(sy - last_sy) >= TOUCH_DEADZONE):
@@ -143,6 +190,7 @@ def main():
                         last_sx, last_sy = sx, sy
                     if time.monotonic() - armed_at >= PRESS_SETTLE:
                         send_event(ufd, EV_KEY, BTN_TOUCH, 1)
+                        send_event(ufd, EV_KEY, BTN_LEFT, 1)
                         send_event(ufd, EV_SYN, SYN_REPORT, 0)
                         touching = True
                         pending = False
