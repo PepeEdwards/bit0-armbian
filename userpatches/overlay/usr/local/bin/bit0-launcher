@@ -8,6 +8,12 @@ Lyra Touch Mouse (absolute, from the touch-mouse daemon) for pointer input.
 Drawing, app launching, and SD handling live in the bit0 lib
 (/usr/local/lib/bit0); this file owns the pages, widgets, and event loop.
 
+Rendering model: the loop drains all pending input, updates state (marking
+widgets dirty), then composes and flushes at most once per tick (~30 fps,
+with a final render when input goes idle). Widgets never flush themselves;
+control values (volume/brightness) come from a cache, never from
+sysfs/subprocess in the draw path.
+
 Started at boot by bit0-launcher.service.
 """
 
@@ -32,6 +38,8 @@ from bit0.sdspi import run_sdcard, sd_release
 
 MOUSE_NAME = 'Lyra UART Mouse'
 TOUCH_NAME = 'Lyra Touch Mouse'
+
+FRAME_S = 0.033  # ~30 fps compose/flush cap (the SPI panel link is slow)
 
 
 def open_inputs():
@@ -99,25 +107,41 @@ SLIDER_X, SLIDER_Y, SLIDER_H = 24, 46, 24
 VOLROW_Y, VOLROW_H = SLIDER_Y + SLIDER_H + 18, 30
 
 
-def make_pages(scr):
+def make_pages(scr, state):
+    """Build the page dicts. Control widgets read/write `state` (the value
+    cache) instead of hitting sysfs/subprocess in the draw path."""
+    def vol_step(d):
+        base = state['vol'] if state['vol'] is not None else get_volume()
+        # optimistic: vol_set returns the clamped pct; the helper runs
+        # without blocking so the % label updates on the next frame
+        state['vol'] = vol_set(base + d, wait=False)
+
+    def vol_text():
+        return '--' if state['vol'] is None else '%d%%' % state['vol']
+
+    def bri_set(pct):
+        # cache now, write sysfs once per render tick (set_brightness's
+        # return refreshes the cache with the clamped value before drawing)
+        state['bri_pending'] = pct
+
     main = column(scr, [('TERMINAL', {'app': run_terminal}),
                         ('PICO-8', {'app': (lambda: run_pico8(scr))}),
                         ('SD CARD', {'app': (lambda: run_sdcard(scr))})])
     main.append({'label': '', 'icon': GEAR_ICON, 'goto': 'settings',
                  'x': scr.w - 36, 'y': 6, 'w': 30, 'h': 26})
     slider = {'slider': True, 'name': 'BRIGHTNESS',
-              'get': get_brightness, 'set': set_brightness,
+              'get': (lambda: state['bri']), 'set': bri_set,
               'x': SLIDER_X, 'y': SLIDER_Y,
               'w': scr.w - 2 * SLIDER_X, 'h': SLIDER_H}
     # volume: [VOL -]  live %  [VOL +]
     gap = 8
     bw3 = (scr.w - 2 * SLIDER_X - 2 * gap) // 3
     volrow = [
-        {'label': 'VOL -', 'act': (lambda: vol_set(get_volume() - 10)),
+        {'label': 'VOL -', 'act': (lambda: vol_step(-10)),
          'x': SLIDER_X, 'y': VOLROW_Y, 'w': bw3, 'h': VOLROW_H},
-        {'display': (lambda: '%d%%' % get_volume()),
+        {'display': vol_text,
          'x': SLIDER_X + bw3 + gap, 'y': VOLROW_Y, 'w': bw3, 'h': VOLROW_H},
-        {'label': 'VOL +', 'act': (lambda: vol_set(get_volume() + 10)),
+        {'label': 'VOL +', 'act': (lambda: vol_step(+10)),
          'x': SLIDER_X + 2 * (bw3 + gap), 'y': VOLROW_Y, 'w': bw3, 'h': VOLROW_H},
     ]
     settings = [slider] + volrow + column_from(scr, [
@@ -137,9 +161,18 @@ def slider_pct(b, x):
     return max(0, min(100, int(round(pct / 5.0) * 5)))
 
 
-def draw_slider(scr, b, hover, flush=True):
+def widget_rect(b):
+    """Scene rectangle a widget composes into (sliders overdraw their
+    label above and knob margins)."""
+    if b.get('slider'):
+        return (b['x'], b['y'] - 18, b['w'] + 4, b['h'] + 24)
+    return (b['x'], b['y'], b['w'], b['h'])
+
+
+def draw_slider(scr, b, hover):
     """Generic slider: label, track + fill + knob, and %. Value comes from
-    b['get'] (e.g. backlight brightness); b['set'] applies drags/taps."""
+    b['get'] (a cache read); b['set'] applies drags/taps. Composes into the
+    scene only - the render tick flushes."""
     pct = b['get']()
     bx, by, bw, bh = b['x'], b['y'], b['w'], b['h']
     scr.fill_rect(bx, by - 18, bw, 16, C_BG)              # clear label area
@@ -155,13 +188,13 @@ def draw_slider(scr, b, hover, flush=True):
     txt = str(pct)
     scr.text(txt, bx + bw - scr.text_width(txt, 2) - 6,
              by + (bh - GLYPH_H * 2) // 2, 2, C_TEXT)
-    if flush:
-        scr.flush(bx, by - 18, bw + 4, bh + 24)
 
 
-def draw_button(scr, b, hover, flush=True):
+def draw_button(scr, b, hover):
+    """Compose one widget into the scene buffer. Never flushes: the render
+    tick is the single flush point (structural fix for residual pixels)."""
     if b.get('slider'):
-        draw_slider(scr, b, hover, flush)
+        draw_slider(scr, b, hover)
         return
     if b.get('display'):
         # borderless live-value text (e.g. current volume between VOL -/+)
@@ -171,8 +204,6 @@ def draw_button(scr, b, hover, flush=True):
         tw = scr.text_width(txt, s)
         scr.text(txt, b['x'] + (b['w'] - tw) // 2,
                  b['y'] + (b['h'] - GLYPH_H * s) // 2, s, C_TEXT)
-        if flush:
-            scr.flush(b['x'], b['y'], b['w'], b['h'])
         return
     face = C_BTNHI if hover else C_BTN
     txt = C_TEXTHI if hover else C_TEXT
@@ -192,8 +223,6 @@ def draw_button(scr, b, hover, flush=True):
         tw = scr.text_width(b['label'], s)
         scr.text(b['label'], b['x'] + (b['w'] - tw) // 2,
                  b['y'] + (b['h'] - GLYPH_H * s) // 2, s, txt)
-    if flush:
-        scr.flush(b['x'], b['y'], b['w'], b['h'])
 
 
 def draw_page(scr, name, btns, hover_idx):
@@ -206,7 +235,7 @@ def draw_page(scr, name, btns, hover_idx):
     tw = scr.text_width(title, s)
     scr.text(title, (scr.w - tw) // 2, 12, s, C_TITLE)
     for i, b in enumerate(btns):
-        draw_button(scr, b, i == hover_idx, flush=False)
+        draw_button(scr, b, i == hover_idx)
     scr.flush()
 
 
@@ -260,7 +289,12 @@ def main():
     if not os.path.exists('/tmp/.bit0-splash-shown'):
         splash(scr)
         open('/tmp/.bit0-splash-shown', 'w').close()
-    pages = make_pages(scr)
+
+    # Value cache: widgets draw from here, never from sysfs/subprocess.
+    # vol is None until first read (on settings-page entry).
+    state = {'vol': None, 'bri': get_brightness(), 'bri_pending': None,
+             'slider_last': None}
+    pages = make_pages(scr, state)
     page = 'main'
     btns = pages[page]
 
@@ -268,9 +302,37 @@ def main():
     hover = -1
     devs = open_inputs()
     print(f'bit0-launcher: inputs: {sorted(devs.values())}', flush=True)
-    draw_page(scr, page, btns, hover)
-    scr.draw_cursor(cx, cy)
+
+    # Render-tick state: `full` = whole page recompose pending, `dirty` =
+    # widget indices to recompose, `cursor_dirty` = pointer moved.
+    dirty = set()
+    full = True
+    cursor_dirty = False
+    last_render = 0.0
     scr._last_cur = (cx, cy)
+
+    def render():
+        """Single flush point per tick: apply deferred sysfs writes, compose
+        dirty widgets, flush their rects (or the whole page), cursor last."""
+        nonlocal dirty, full, cursor_dirty, last_render
+        if state['bri_pending'] is not None:
+            state['bri'] = set_brightness(state['bri_pending'])
+            state['bri_pending'] = None
+        if full:
+            draw_page(scr, page, btns, hover)  # full-frame flush covers the
+        else:                                  # old cursor patch too
+            scr.erase_cursor(*scr._last_cur)
+            for i in dirty:
+                draw_button(scr, btns[i], i == hover)
+                scr.flush(*widget_rect(btns[i]))
+        scr.draw_cursor(cx, cy)
+        scr._last_cur = (cx, cy)
+        dirty = set()
+        full = False
+        cursor_dirty = False
+        last_render = time.monotonic()
+
+    render()
 
     ax = ay = None  # latest absolute touch sample
     pend = {'mouse': False, 'touch': False}  # button-down awaiting SYN
@@ -281,8 +343,16 @@ def main():
             devs = open_inputs()
             continue
 
-        r, _, _ = select.select(list(devs), [], [], 5)
-        if not r and len(set(devs.values())) < 2:
+        # select timeout = next scheduled deadline: the remaining frame
+        # budget when a render is pending, else the 5 s rescan idle.
+        pending = full or dirty or cursor_dirty \
+            or state['bri_pending'] is not None
+        if pending:
+            timeout = max(0.0, FRAME_S - (time.monotonic() - last_render))
+        else:
+            timeout = 5
+        r, _, _ = select.select(list(devs), [], [], timeout)
+        if not r and not pending and len(set(devs.values())) < 2:
             # idle and missing a device (e.g. touch daemon started late):
             # rescan so hot-(re)started devices get picked up
             close_inputs(devs)
@@ -347,30 +417,30 @@ def main():
         cy = max(0, min(scr.h - 1, cy))
 
         if moved or clicked:
+            cursor_dirty = True
             new_hover = hit(btns, cx, cy)
-            scr.erase_cursor(*getattr(scr, '_last_cur', (cx, cy)))
             on_slider = new_hover >= 0 and btns[new_hover].get('slider')
             if on_slider and (clicked or held):
-                # tap or drag on the slider sets its value by position
+                # tap or drag on the slider: cache the value now, write
+                # sysfs and redraw on the next render tick
                 target = slider_pct(btns[new_hover], cx)
-                if target != getattr(scr, '_slider_last', None):
+                if target != state['slider_last']:
                     btns[new_hover]['set'](target)
-                    scr._slider_last = target
+                    state['slider_last'] = target
+                    dirty.add(new_hover)
                 if hover >= 0 and hover != new_hover:
-                    draw_button(scr, btns[hover], False)
+                    dirty.add(hover)
+                    dirty.add(new_hover)
                 hover = new_hover
-                draw_slider(scr, btns[new_hover], True)
                 clicked = False  # consume: don't treat as a button activation
             else:
-                scr._slider_last = None
+                state['slider_last'] = None
                 if new_hover != hover:
                     if hover >= 0:
-                        draw_button(scr, btns[hover], False)
+                        dirty.add(hover)
                     if new_hover >= 0:
-                        draw_button(scr, btns[new_hover], True)
+                        dirty.add(new_hover)
                     hover = new_hover
-            scr.draw_cursor(cx, cy)
-            scr._last_cur = (cx, cy)
 
         if clicked and hover >= 0:
             b = btns[hover]
@@ -378,6 +448,11 @@ def main():
                 page = b['goto']
                 btns = pages[page]
                 hover = -1
+                if page == 'settings':
+                    # one blocking read per entry; every redraw after this
+                    # uses the cache (a VOL click costs 1 spawn, not 3)
+                    state['vol'] = get_volume()
+                full = True
             elif 'cmd' in b:
                 print(f'bit0-launcher: {b["msg"]}', flush=True)
                 fullscreen_message(scr, b['msg'])
@@ -385,12 +460,15 @@ def main():
                     subprocess.call(argv)
                 time.sleep(60)  # init takes over from here
             elif 'act' in b:
-                # in-page action (e.g. volume +/-): run it and stay on the
-                # page; the trailing redraw refreshes the volume bar.
+                # in-page action (e.g. volume +/-): run it, then refresh the
+                # value widgets (slider/display) that read from the cache
                 try:
                     b['act']()
                 except Exception as exc:
                     print(f'bit0-launcher: act: {exc}', flush=True)
+                for i, bb in enumerate(btns):
+                    if bb.get('display') or bb.get('slider'):
+                        dirty.add(i)
             elif 'app' in b:
                 label = b['label']
                 print(f'bit0-launcher: launching {label}', flush=True)
@@ -405,12 +483,17 @@ def main():
                 btns = pages[page]
                 hover = -1
                 ax = ay = None
-            else:
-                clicked = False  # inert button (no action keys)
-            if clicked:
-                draw_page(scr, page, btns, hover)
-                scr.draw_cursor(cx, cy)
-                scr._last_cur = (cx, cy)
+                full = True
+
+        # Frame pacing: render when anything is dirty, but cap at ~30 fps
+        # during pointer/drag floods; when select timed out (input idle) or
+        # on a click/page change, render immediately so the final state and
+        # activations never wait a frame.
+        if full or dirty or cursor_dirty or state['bri_pending'] is not None:
+            idle = not r
+            if idle or clicked or full \
+                    or (time.monotonic() - last_render) >= FRAME_S:
+                render()
 
 
 if __name__ == '__main__':

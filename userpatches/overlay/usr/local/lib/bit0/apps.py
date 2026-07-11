@@ -78,10 +78,17 @@ def get_volume():
         return 0
 
 
-def vol_set(pct):
+def vol_set(pct, wait=True):
+    """Set volume via bit0-vol; returns the clamped pct so callers can
+    update a cached value optimistically. wait=False fires the helper
+    without blocking the UI (subprocess reaps abandoned children on the
+    next spawn, so no zombies accumulate)."""
     pct = max(0, min(100, int(pct)))
-    subprocess.call([VOL_HELPER, 'set', str(pct)],
-                    stderr=subprocess.DEVNULL)
+    argv = [VOL_HELPER, 'set', str(pct)]
+    if wait:
+        subprocess.call(argv, stderr=subprocess.DEVNULL)
+    else:
+        subprocess.Popen(argv, stderr=subprocess.DEVNULL)
     return pct
 
 
@@ -92,10 +99,23 @@ def _bl_read(name):
         return int(f.read())
 
 
+_bl_max = 0  # max_brightness never changes; read sysfs once
+
+
+def _bl_max_cached():
+    global _bl_max
+    if not _bl_max:
+        try:
+            _bl_max = _bl_read('max_brightness') or 255
+        except (OSError, ValueError):
+            _bl_max = 255
+    return _bl_max
+
+
 def get_brightness():
     try:
-        mx = _bl_read('max_brightness') or 255
-        return max(0, min(100, round(_bl_read('brightness') * 100 / mx)))
+        return max(0, min(100, round(_bl_read('brightness') * 100
+                                     / _bl_max_cached())))
     except (OSError, ValueError):
         return 100
 
@@ -105,9 +125,8 @@ def set_brightness(pct):
     # user would be stuck dragging a slider on an invisible screen.
     pct = max(5, min(100, int(pct)))
     try:
-        mx = _bl_read('max_brightness') or 255
         with open(f'{BL_DIR}/brightness', 'w') as f:
-            f.write(str(max(1, round(pct * mx / 100))))
-    except (OSError, ValueError):
+            f.write(str(max(1, round(pct * _bl_max_cached() / 100))))
+    except OSError:
         pass
     return pct

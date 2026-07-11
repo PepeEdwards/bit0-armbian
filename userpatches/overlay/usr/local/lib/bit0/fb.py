@@ -2,6 +2,7 @@
 bitmap font, cursor/icons. No DirectFB/SDL dependency, so it coexists with
 whatever the launched apps use."""
 
+import functools
 import struct
 
 from .evdev import fb_size
@@ -68,6 +69,28 @@ FONT = {
 }
 GLYPH_W, GLYPH_H = 6, 7
 
+
+@functools.lru_cache(maxsize=1024)
+def _glyph_blits(ch, scale, color):
+    """Pre-rendered opaque spans for one glyph at (scale, color): a list of
+    (dy_px, dx_px, row_bytes) blitted with slice assignment. Only set pixels
+    get spans, so text stays transparent over any background."""
+    px = struct.pack('<H', color)
+    blits = []
+    for gy, line in enumerate(FONT.get(ch, FONT[' '])):
+        gx = 0
+        while gx < len(line):
+            if line[gx] != '#':
+                gx += 1
+                continue
+            start = gx
+            while gx < len(line) and line[gx] == '#':
+                gx += 1
+            row = px * ((gx - start) * scale)
+            for sy in range(scale):
+                blits.append(((gy * scale + sy), start * scale, row))
+    return blits
+
 ARROW = [
     "#       ",
     "##      ",
@@ -130,14 +153,10 @@ class Screen:
             self.scene[off:off + w * 2] = row
 
     def text(self, s, x, y, scale, color):
-        px = struct.pack('<H', color)
         for ch in s:
-            glyph = FONT.get(ch, FONT[' '])
-            for gy, line in enumerate(glyph):
-                for gx, c in enumerate(line):
-                    if c == '#':
-                        self.fill_rect(x + gx * scale, y + gy * scale,
-                                       scale, scale, color)
+            for dy, dx, row in _glyph_blits(ch, scale, color):
+                off = ((y + dy) * self.w + x + dx) * 2
+                self.scene[off:off + len(row)] = row
             x += GLYPH_W * scale
 
     def text_width(self, s, scale):
