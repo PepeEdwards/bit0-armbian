@@ -2,8 +2,9 @@
 
 Widget: a rectangle that composes itself into the Screen's scene buffer
 and never flushes - the launcher's render tick is the single flush point.
-Page: an ordered widget list with one hover index (audit 6.4 grows this
-into a keyboard focus ring). Router: a page stack (push/pop for settings).
+Page: an ordered widget list with one focus index shared by pointer
+hover and keyboard navigation (audit 6.4) - one concept, so highlight
+code can't disagree. Router: a page stack (push/pop for settings).
 
 Layout containers (vstack/hstack in widgets.py) assign widget rects up
 front and pages hold the flattened list: on a 320x240 screen with no
@@ -18,7 +19,8 @@ class Widget:
     """Base widget. Subclasses override draw() (compose into the scene,
     never flush) and optionally the input hooks."""
 
-    is_value = False  # True: redraws from the State cache (Slider/LiveLabel)
+    is_value = False   # True: redraws from the State cache (Slider/LiveLabel)
+    focusable = True   # False: skipped by the focus ring and pointer focus
 
     def __init__(self, x=0, y=0, w=0, h=0):
         self.x, self.y, self.w, self.h = x, y, w, h
@@ -35,7 +37,7 @@ class Widget:
         what is repainted becomes a stale trace when flushed alone."""
         return (self.x, self.y, self.w, self.h)
 
-    def draw(self, scr, hover):
+    def draw(self, scr, focused):
         raise NotImplementedError
 
     def on_click(self, px, py):
@@ -47,10 +49,24 @@ class Widget:
         return False
 
     def on_pointer(self, px, py):
-        """Pointer position update for widgets with internal hover state
+        """Pointer position update for widgets with internal focus state
         (AppGrid tiles); (-1, -1) means the pointer left the widget.
         Returns True if a repaint is needed."""
         return False
+
+    def on_key(self, code):
+        """Key hook for the focused widget, tried before page-level
+        navigation. Returns an action dict, True if consumed, or
+        None/False if unhandled."""
+        return None
+
+    def on_focus(self, gained):
+        """Keyboard focus entered/left this widget (pointer moves go
+        through on_pointer instead)."""
+
+    def activate(self):
+        """ENTER on the focused widget: same code path as a click."""
+        return self.on_click(self.x, self.y)
 
 
 class Page:
@@ -58,7 +74,7 @@ class Page:
         self.name = name
         self.title = title
         self.widgets = widgets
-        self.hover = -1
+        self.focus = -1
 
     def widget_at(self, px, py):
         for i, w in enumerate(self.widgets):
@@ -66,24 +82,47 @@ class Page:
                 return i
         return -1
 
-    def hovered(self):
-        return self.widgets[self.hover] if self.hover >= 0 else None
+    def focused(self):
+        return self.widgets[self.focus] if self.focus >= 0 else None
 
     def pointer(self, px, py):
-        """Move hover to the widget under the pointer, forwarding the
-        position to widgets with internal hover; marks affected widgets
-        dirty."""
+        """Re-derive focus from hit-testing (pointer motion), forwarding
+        the position to widgets with internal focus; marks affected
+        widgets dirty."""
         idx = self.widget_at(px, py)
-        if idx != self.hover:
-            if self.hover >= 0:
-                old = self.widgets[self.hover]
+        if idx >= 0 and not self.widgets[idx].focusable:
+            idx = -1
+        if idx != self.focus:
+            if self.focus >= 0:
+                old = self.widgets[self.focus]
                 old.on_pointer(-1, -1)
                 old.dirty = True
             if idx >= 0:
                 self.widgets[idx].dirty = True
-            self.hover = idx
+            self.focus = idx
         if idx >= 0 and self.widgets[idx].on_pointer(px, py):
             self.widgets[idx].dirty = True
+
+    def focus_step(self, step):
+        """Move keyboard focus along the ring of focusable widgets,
+        ordered by (y, x), wrapping at the ends."""
+        ring = sorted((i for i, w in enumerate(self.widgets) if w.focusable),
+                      key=lambda i: (self.widgets[i].y, self.widgets[i].x))
+        if not ring:
+            return
+        if self.focus in ring:
+            new = ring[(ring.index(self.focus) + step) % len(ring)]
+        else:
+            new = ring[0] if step > 0 else ring[-1]
+        if new == self.focus:
+            return
+        if self.focus >= 0:
+            old = self.widgets[self.focus]
+            old.on_focus(False)
+            old.dirty = True
+        self.focus = new
+        self.widgets[new].on_focus(True)
+        self.widgets[new].dirty = True
 
     def compose(self, scr):
         """Compose the full page (background, title, widgets) into the
@@ -94,7 +133,7 @@ class Page:
         tw = scr.text_width(self.title, s)
         scr.text(self.title, (scr.w - tw) // 2, 12, s, th.title)
         for i, w in enumerate(self.widgets):
-            w.draw(scr, i == self.hover)
+            w.draw(scr, i == self.focus)
             w.dirty = False
 
     def mark_all(self):
@@ -113,7 +152,7 @@ class Page:
 
 
 class Router:
-    """Page stack; `page` is the top. push/pop reset hover and mark the
+    """Page stack; `page` is the top. push/pop reset focus and mark the
     new page for a full recompose."""
 
     def __init__(self, pages, root):
@@ -126,7 +165,7 @@ class Router:
 
     def _enter(self):
         p = self.page
-        p.hover = -1
+        p.focus = -1
         p.mark_all()
         return p
 

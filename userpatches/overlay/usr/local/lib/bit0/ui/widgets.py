@@ -1,6 +1,7 @@
 """Widgets for the Bit0 launcher (audit 6.1). Compose-only: no widget
 writes to the framebuffer; the launcher's render tick flushes."""
 
+from ..evdev import KEY_LEFT, KEY_RIGHT
 from ..fb import GLYPH_W, GLYPH_H
 from .core import Widget
 from .assets import load_icon
@@ -49,10 +50,10 @@ class Button(Widget):
         self.icon = icon
         self.action = action
 
-    def draw(self, scr, hover):
+    def draw(self, scr, focused):
         th = theme()
-        face = th.btn_hi if hover else th.btn
-        fg = th.text_hi if hover else th.text
+        face = th.btn_hi if focused else th.btn
+        fg = th.text_hi if focused else th.text
         scr.fill_rect(self.x, self.y, self.w, self.h, th.border)
         scr.fill_rect(self.x + 2, self.y + 2, self.w - 4, self.h - 4, face)
         if self.icon:
@@ -73,12 +74,13 @@ class LiveLabel(Widget):
     """Borderless centered text from a callable (a State-cache read)."""
 
     is_value = True
+    focusable = False
 
     def __init__(self, fn, **rect):
         super().__init__(**rect)
         self.fn = fn
 
-    def draw(self, scr, hover):
+    def draw(self, scr, focused):
         th = theme()
         scr.fill_rect(self.x, self.y, self.w, self.h, th.bg)
         s = 2
@@ -118,7 +120,17 @@ class Slider(Widget):
             self.dirty = True
         return True
 
-    def draw(self, scr, hover):
+    def on_key(self, code):
+        # LEFT/RIGHT scrub by 5%; autorepeat gives hold-to-scrub
+        if code not in (KEY_LEFT, KEY_RIGHT):
+            return None
+        step = -5 if code == KEY_LEFT else 5
+        self.setter(max(0, min(100, self.getter() + step)))
+        self._last_sent = None  # a following drag must not be deduped away
+        self.dirty = True
+        return True
+
+    def draw(self, scr, focused):
         th = theme()
         pct = self.getter()
         bx, by, bw, bh = self.x, self.y, self.w, self.h
@@ -130,7 +142,7 @@ class Slider(Widget):
         fillw = int((bw - 2) * pct / 100)
         if fillw > 0:
             scr.fill_rect(bx + 1, by + 1, fillw, bh - 2,
-                          th.btn_hi if hover else th.title)
+                          th.btn_hi if focused else th.title)
         kx = bx + min(fillw, bw - 4)
         scr.fill_rect(kx, by - 3, 4, bh + 6, th.border)         # knob
         # label inside the bar (above it, it collided with the back button)
@@ -174,10 +186,10 @@ class Tile(Widget):
         maxc = max(1, (self.w - 6) // GLYPH_W)
         return 1, [label[i:i + maxc] for i in range(0, len(label), maxc)][:4]
 
-    def draw(self, scr, hover):
+    def draw(self, scr, focused):
         th = theme()
-        face = th.btn_hi if hover else th.btn
-        fg = th.text_hi if hover else th.text
+        face = th.btn_hi if focused else th.btn
+        fg = th.text_hi if focused else th.text
         scr.fill_rect(self.x, self.y, self.w, self.h, th.border)
         scr.fill_rect(self.x + 2, self.y + 2, self.w - 4, self.h - 4, face)
         if self.icon:
@@ -220,7 +232,7 @@ class AppGrid(Widget):
         self.per_page = max(1, per_page if per_page is not None
                             else th.tiles_per_page)
         self.pageno = 0
-        self._hover = None  # 'l' / 'r' / tile index / None
+        self._focus = None  # 'l' / 'r' / tile index / None (pointer + keyboard)
         self._tiles = []
         self._arrow_l = self._arrow_r = None
         self._rebuild()
@@ -254,8 +266,8 @@ class AppGrid(Widget):
 
     def on_pointer(self, px, py):
         new = self._target_at(px, py)
-        if new != self._hover:
-            self._hover = new
+        if new != self._focus:
+            self._focus = new
             return True
         return False
 
@@ -264,7 +276,7 @@ class AppGrid(Widget):
         new = self.pageno + step
         if 0 <= new * self.per_page < len(self.entries):
             self.pageno = new
-            self._hover = None
+            self._focus = None
             self._rebuild()
             self.dirty = True
             return True
@@ -282,17 +294,49 @@ class AppGrid(Widget):
             return self._tiles[t].on_click(px, py)
         return None
 
-    def draw(self, scr, hover):
+    def on_key(self, code):
+        """LEFT/RIGHT move focus across the tile row; moving past the
+        row's edge pages the grid when another page exists (same effect
+        as the arrow tile), else the key falls through to the page ring
+        so keyboard focus can leave the grid (audit 6.4)."""
+        if code not in (KEY_LEFT, KEY_RIGHT):
+            return None
+        i = self._focus if isinstance(self._focus, int) else 0
+        step = -1 if code == KEY_LEFT else 1
+        j = i + step
+        if 0 <= j < len(self._tiles):
+            self._focus = j
+            self.dirty = True
+            return True
+        if self.flip(step):
+            self._focus = len(self._tiles) - 1 if step < 0 else 0
+            return True
+        return None
+
+    def on_focus(self, gained):
+        if gained:
+            if not isinstance(self._focus, int):
+                self._focus = 0
+        else:
+            self._focus = None
+        self.dirty = True
+
+    def activate(self):
+        if isinstance(self._focus, int) and self._focus < len(self._tiles):
+            return self._tiles[self._focus].on_click(0, 0)
+        return None
+
+    def draw(self, scr, focused):
         th = theme()
         scr.fill_rect(self.x, self.y, self.w, self.h, th.bg)
         for i, t in enumerate(self._tiles):
-            t.draw(scr, self._hover == i)
+            t.draw(scr, self._focus == i)
         for which, rect, name, fb in (('l', self._arrow_l, 'left.pbm', _TRI_L),
                                       ('r', self._arrow_r, 'right.pbm', _TRI_R)):
             if not rect:
                 continue
             rows = load_icon(name) or fb
             iw, ih = icon_size(rows)
-            color = th.btn_hi if self._hover == which else th.text
+            color = th.btn_hi if self._focus == which else th.text
             draw_icon(scr, rows, rect[0] + (rect[2] - iw) // 2,
                       rect[1] + (rect[3] - ih) // 2, color)

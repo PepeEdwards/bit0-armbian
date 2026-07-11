@@ -1,5 +1,6 @@
 """evdev constants and event IO shared by the Bit0 daemons."""
 
+import fcntl
 import os
 import struct
 
@@ -19,6 +20,10 @@ BTN_LEFT, BTN_RIGHT, BTN_MIDDLE = 0x110, 0x111, 0x112
 BTN_SIDE, BTN_EXTRA = 0x113, 0x114
 BTN_TOUCH = 0x14a
 KEY_ESC = 1
+KEY_ENTER, KEY_KPENTER = 28, 96
+KEY_SPACE = 57
+KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT = 103, 108, 105, 106
+KEY_BACK = 158
 
 BUS_USB = 0x03
 
@@ -28,6 +33,13 @@ EVENT_FORMAT = 'llHHi'
 EVENT_SIZE = struct.calcsize(EVENT_FORMAT)
 
 EVIOCGRAB = 0x40044590
+
+
+def grab(f, on=True):
+    """EVIOCGRAB an input device (exclusive delivery). The launcher grabs
+    the keyboard so keys stop leaking to the console's kbd handler while
+    the menu owns the screen; closing the fd also releases the grab."""
+    fcntl.ioctl(f, EVIOCGRAB, 1 if on else 0)
 
 
 def send_event(fd, ev_type, code, value):

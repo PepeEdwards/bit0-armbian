@@ -15,6 +15,7 @@ cache, never from sysfs/subprocess in the draw path.
 Started at boot by bit0-launcher.service.
 """
 
+import atexit
 import os
 import sys
 import fcntl
@@ -25,7 +26,9 @@ import time
 sys.path.insert(0, '/usr/local/lib')
 from bit0.evdev import (EV_SYN, EV_KEY, EV_REL, EV_ABS,
                         REL_X, REL_Y, ABS_X, ABS_Y, BTN_LEFT, BTN_TOUCH,
-                        EVENT_SIZE, unpack_event, find_event)
+                        KEY_ESC, KEY_ENTER, KEY_KPENTER, KEY_BACK,
+                        KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT,
+                        EVENT_SIZE, unpack_event, find_event, grab)
 from bit0.fb import Screen, fullscreen_message, GLYPH_H
 from bit0.apps import (kill_stale, launch_entry, run_terminal, run_calibrate,
                        get_volume, vol_set, vol_state_read,
@@ -39,27 +42,54 @@ from bit0.ui.widgets import Button, LiveLabel, Slider, AppGrid, vstack, hstack
 
 MOUSE_NAME = 'Lyra UART Mouse'
 TOUCH_NAME = 'Lyra Touch Mouse'
+KBD_NAME = 'Lyra UART Keyboard'
+N_KINDS = 3  # mouse + touch + kbd: fewer online -> periodic rescan
 
 FRAME_S = 0.033  # ~30 fps compose/flush cap (the SPI panel link is slow)
 
+# ENTER-like keys never act on autorepeat (no repeat-activation); arrows
+# do repeat for hold-to-scrub sliders and menu movement (audit 6.4)
+NO_REPEAT = (KEY_ENTER, KEY_KPENTER, KEY_ESC, KEY_BACK)
+
+
+_devs = {}  # live input fds; module-global so the atexit hook reaches them
+
 
 def open_inputs():
-    """Returns {fd_object: kind} for the mouse and touch devices."""
+    """Returns {fd_object: kind} for the pointer + keyboard devices. The
+    keyboard is EVIOCGRAB'd: it has a console kbd handler, and without
+    the grab every menu keypress would leak to the tty under the UI. The
+    grab can never outlive the menu: close_inputs releases it explicitly
+    (app launches, atexit), and the kernel drops grabs with the fd on any
+    process death - the terminal app depends on the console path."""
+    global _devs
     devs = {}
-    for name, kind in ((MOUSE_NAME, 'mouse'), (TOUCH_NAME, 'touch')):
+    for name, kind in ((MOUSE_NAME, 'mouse'), (TOUCH_NAME, 'touch'),
+                       (KBD_NAME, 'kbd')):
         path = find_event(name)
         if path:
             try:
                 f = open(path, 'rb', buffering=0)
                 os.set_blocking(f.fileno(), False)
+                if kind == 'kbd':
+                    try:
+                        grab(f, True)
+                    except OSError:
+                        pass  # ungrabbed keyboard still navigates
                 devs[f] = kind
             except OSError:
                 pass
+    _devs = devs
     return devs
 
 
 def close_inputs(devs):
-    for f in devs:
+    for f, kind in devs.items():
+        if kind == 'kbd':
+            try:
+                grab(f, False)  # explicit: the console gets keys back NOW
+            except OSError:
+                pass
         try:
             f.close()
         except OSError:
@@ -138,9 +168,21 @@ def build_pages(scr, state, th):
     slider = Slider('BRIGHTNESS', getter=(lambda: state['bri']),
                     setter=bri_set, x=24, y=slider_y, w=scr.w - 48,
                     h=th.slider_h)
-    volrow = hstack([Button('VOL -', action={'act': (lambda: vol_step(-10))}),
-                     LiveLabel(vol_text),
-                     Button('VOL +', action={'act': (lambda: vol_step(+10))})],
+    vol_label = LiveLabel(vol_text)
+
+    def volrow_key(code):
+        # focus anywhere on the volume row: LEFT/RIGHT step the volume
+        if code not in (KEY_LEFT, KEY_RIGHT):
+            return None
+        vol_step(-10 if code == KEY_LEFT else 10)
+        vol_label.dirty = True
+        return True
+
+    vol_minus = Button('VOL -', action={'act': (lambda: vol_step(-10))})
+    vol_plus = Button('VOL +', action={'act': (lambda: vol_step(+10))})
+    vol_minus.on_key = volrow_key
+    vol_plus.on_key = volrow_key
+    volrow = hstack([vol_minus, vol_label, vol_plus],
                     x=24, y=volrow_y, w=scr.w - 48, h=volrow_h, gap=8)
     col = vstack([
         Button('CALIBRATE',
@@ -157,6 +199,28 @@ def build_pages(scr, state, th):
     settings = Page('settings', 'SETTINGS', [slider] + volrow + col + [back])
 
     return {'main': main, 'settings': settings}
+
+
+def page_key(pg, code):
+    """Keyboard navigation on a page (audit 6.4): the focused widget's
+    hook first (slider scrub, volume step, grid row movement), then the
+    focus ring / activate / back. Returns an action dict or None."""
+    w = pg.focused()
+    if w:
+        r = w.on_key(code)
+        if isinstance(r, dict):
+            return r
+        if r:
+            return None  # consumed by the widget
+    if code in (KEY_UP, KEY_LEFT):
+        pg.focus_step(-1)
+    elif code in (KEY_DOWN, KEY_RIGHT):
+        pg.focus_step(+1)
+    elif code in (KEY_ENTER, KEY_KPENTER):
+        return w.activate() if w else None
+    elif code in (KEY_ESC, KEY_BACK):
+        return {'pop': True}
+    return None
 
 
 _lock = None  # must stay open for the process lifetime
@@ -213,10 +277,12 @@ def main():
 
     cx, cy = scr.w // 2, scr.h // 2
     devs = open_inputs()
+    atexit.register(lambda: close_inputs(_devs))  # kbd grab dies with us
     print(f'bit0-launcher: inputs: {sorted(devs.values())}', flush=True)
 
     full = True           # full-page recompose pending
-    cursor_dirty = False  # pointer moved since the last render
+    cursor_dirty = False  # pointer moved / cursor visibility changed
+    cursor_on = True      # hidden after keyboard use, back on pointer motion
     last_render = 0.0
     scr._last_cur = (cx, cy)
 
@@ -235,11 +301,12 @@ def main():
             scr.erase_cursor(*scr._last_cur)
             for i, w in enumerate(pg.widgets):
                 if w.dirty:
-                    w.draw(scr, i == pg.hover)
+                    w.draw(scr, i == pg.focus)
                     scr.flush(*w.flush_rect())
                     w.dirty = False
-        scr.draw_cursor(cx, cy)
-        scr._last_cur = (cx, cy)
+        if cursor_on:
+            scr.draw_cursor(cx, cy)
+            scr._last_cur = (cx, cy)
         full = False
         cursor_dirty = False
         last_render = time.monotonic()
@@ -274,7 +341,7 @@ def main():
         if r:
             last_input = now
         elif not pending and now - last_input >= 5 \
-                and len(set(devs.values())) < 2:
+                and len(set(devs.values())) < N_KINDS:
             # idle >=5 s and missing a device (e.g. touch daemon started
             # late): rescan so hot-(re)started devices get picked up
             close_inputs(devs)
@@ -294,6 +361,7 @@ def main():
         clicked = False
         moved = False
         lost = False
+        keys = []  # (code, value) presses/repeats from the grabbed keyboard
         for f in r:
             kind = devs[f]
             while True:  # drain everything queued on this fd
@@ -307,7 +375,10 @@ def main():
                     lost = True
                     break
                 t, code, v = unpack_event(data)
-                if kind == 'mouse':
+                if kind == 'kbd':
+                    if t == EV_KEY and v in (1, 2):
+                        keys.append((code, v))
+                elif kind == 'mouse':
                     if t == EV_REL and code == REL_X:
                         cx += v
                         moved = True
@@ -349,17 +420,33 @@ def main():
         cx = max(0, min(scr.w - 1, cx))
         cy = max(0, min(scr.h - 1, cy))
 
+        act = None
+        if keys:
+            if cursor_on:  # keyboard drives now: hide the cursor
+                cursor_on = False
+                cursor_dirty = True
+            for code, val in keys:
+                if val == 2 and code in NO_REPEAT:
+                    continue  # no activation on autorepeat
+                a = page_key(pg, code)
+                if a and act is None:
+                    act = a  # one action per tick; later keys still navigate
+
         if moved or clicked:
+            if not cursor_on:  # pointer motion brings the cursor back
+                cursor_on = True
             cursor_dirty = True
             pg.pointer(cx, cy)
-            w = pg.hovered()
+            w = pg.focused()
             # tap or drag consumed by the widget (slider scrubbing)
             if w and (clicked or held) and w.on_drag(cx, cy):
                 clicked = False
 
-        if clicked:
-            w = pg.hovered()
-            act = (w.on_click(cx, cy) if w else None) or {}
+        if clicked and act is None:
+            w = pg.focused()
+            act = w.on_click(cx, cy) if w else None
+
+        if act:
             if 'push' in act:
                 pg = router.push(act['push'])
                 if pg.name == 'settings':
@@ -373,8 +460,9 @@ def main():
                         state['vol_mtime'] = st[0]
                 full = True
             elif 'pop' in act:
-                pg = router.pop()
-                full = True
+                if len(router.stack) > 1:  # ESC on the root page: no-op
+                    pg = router.pop()
+                    full = True
             elif 'cmd' in act:
                 print(f'bit0-launcher: {act["msg"]}', flush=True)
                 fullscreen_message(scr, act['msg'])
@@ -404,13 +492,13 @@ def main():
                 full = True
 
         # Frame pacing: render when anything is dirty, but cap at ~30 fps
-        # during pointer/drag floods; when select timed out (input idle) or
-        # on a click/page change, render immediately so the final state and
-        # activations never wait a frame.
+        # during pointer/drag/key floods; when select timed out (input
+        # idle) or on an activation/page change, render immediately so the
+        # final state never waits a frame.
         pg = router.page
         if full or cursor_dirty or pg.dirty_widgets() \
                 or state['bri_pending'] is not None:
-            if not r or clicked or full \
+            if not r or clicked or act or full \
                     or (time.monotonic() - last_render) >= FRAME_S:
                 render()
 
