@@ -25,5 +25,9 @@ done
 "$ADB" shell chmod +x /usr/local/bin/bit0-launcher /usr/local/bin/bit0-vol
 # stale bytecode from the previous lib would shadow the pushed sources
 "$ADB" shell rm -rf /usr/local/lib/bit0/__pycache__
-"$ADB" shell systemctl restart bit0-launcher
+# sync BEFORE restarting: if the new launcher crashes and the device gets
+# power-cycled, unsynced pushes read back as 0xFF flash garbage
+"$ADB" shell sync
+# reset-failed clears a possible start-rate-limit lockout from a crash loop
+"$ADB" shell "systemctl reset-failed bit0-launcher 2>/dev/null; systemctl restart bit0-launcher"
 echo "==> done; follow logs with: adb shell journalctl -u bit0-launcher -f"
