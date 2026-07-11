@@ -12,6 +12,7 @@ nested scrolling, a recursive tree would only add recursive hit-testing
 and dirty bookkeeping for nothing.
 """
 
+from ..evdev import KEY_ENTER, KEY_KPENTER, KEY_SPACE, KEY_ESC
 from .theme import current as theme
 
 
@@ -36,6 +37,13 @@ class Widget:
         draw() must fully repaint this rect - anything ever painted outside
         what is repainted becomes a stale trace when flushed alone."""
         return (self.x, self.y, self.w, self.h)
+
+    def flush_rects(self):
+        """Flush rectangles for this widget - a list so disjoint regions
+        (mascot sprite + floating bubble) don't force one union rect
+        whose margins would overpaint other widgets. The repaint
+        invariant of flush_rect applies to each rect."""
+        return [self.flush_rect()]
 
     def draw(self, scr, focused):
         raise NotImplementedError
@@ -153,11 +161,38 @@ class Page:
 
 class Router:
     """Page stack; `page` is the top. push/pop reset focus and mark the
-    new page for a full recompose."""
+    new page for a full recompose.
 
-    def __init__(self, pages, root):
+    `overlay` (the mascot) gets input precedence while its bubble is
+    visible: ENTER/SPACE and clicks anywhere advance the message queue,
+    ESC dismisses it, arrows fall through to the focus ring. The rule
+    lives here so widgets never need to know about the bubble (6.5)."""
+
+    def __init__(self, pages, root, overlay=None):
         self.pages = pages
         self.stack = [root]
+        self.overlay = overlay
+
+    def intercept_key(self, code):
+        """True if the overlay consumed the key (caller: full redraw)."""
+        o = self.overlay
+        if not (o and o.bubble_visible):
+            return False
+        if code in (KEY_ENTER, KEY_KPENTER, KEY_SPACE):
+            o.advance()
+            return True
+        if code == KEY_ESC:
+            o.dismiss()
+            return True
+        return False
+
+    def intercept_click(self):
+        """True if the overlay consumed a click (advances the bubble)."""
+        o = self.overlay
+        if o and o.bubble_visible:
+            o.advance()
+            return True
+        return False
 
     @property
     def page(self):

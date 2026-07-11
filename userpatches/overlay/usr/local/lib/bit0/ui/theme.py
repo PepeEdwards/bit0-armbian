@@ -14,7 +14,7 @@ case it logs and looks default.
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 THEME_PATH = os.environ.get('BIT0_THEME', '/usr/local/share/bit0/theme.json')
 
@@ -37,7 +37,8 @@ class Theme:
     button_w: int = 260
     button_max_h: int = 48
     slider_h: int = 24
-    mascot_strip: int = 0     # bottom strip reserved for the mascot (6.5)
+    mascot_strip: int = 66    # main-page bottom band for the mascot's
+                              # sprite box + dialogue box (6.5)
     # feature toggles
     page_dots: bool = False   # AppGrid page indicator (unimplemented in v1)
     typewriter: bool = False  # mascot bubble reveal (6.5)
@@ -49,6 +50,14 @@ class Theme:
     splash_bar_color: int = 0xFD20
     splash_bg_color: int = 0x0000
     splash_logo: str = ''     # icon filename drawn above/instead of the text
+    # mascot ([mascot] section, 6.5); greeting shows once per boot
+    mascot_enabled: bool = True
+    mascot_greeting: list = field(default_factory=lambda: [
+        'HELLO AGAIN.', 'PICK AN APP TO START.'])
+    # resting phrases: the bubble never empties, it rotates through these
+    # when the message queue runs out (empty list = bubble hides instead)
+    mascot_idle: list = field(default_factory=lambda: [
+        'IM HERE.', 'IM WAITING...', 'LET ME KNOW.'])
 
 
 def _color(v):
@@ -81,6 +90,12 @@ def _str(v):
     return v
 
 
+def _strlist(v):
+    if not isinstance(v, list) or not all(isinstance(s, str) for s in v):
+        raise ValueError(f'not a list of strings: {v!r}')
+    return v
+
+
 # json section -> key -> (Theme attribute, validator)
 _SCHEMA = {
     'colors': {k: (k, _color) for k in
@@ -91,6 +106,9 @@ _SCHEMA = {
     | {'tile_label_scale_max': ('tile_label_scale_max', _num)},
     'features': {'page_dots': ('page_dots', _bool),
                  'typewriter': ('typewriter', _bool)},
+    'mascot': {'enabled': ('mascot_enabled', _bool),
+               'greeting': ('mascot_greeting', _strlist),
+               'idle': ('mascot_idle', _strlist)},
     'splash': {
         'text': ('splash_text', _str),
         'duration_s': ('splash_duration_s', _num),

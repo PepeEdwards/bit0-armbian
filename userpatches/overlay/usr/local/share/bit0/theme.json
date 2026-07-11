@@ -16,7 +16,12 @@
     "button_w": 260,
     "button_max_h": 48,
     "slider_h": 24,
-    "mascot_strip": 0
+    "mascot_strip": 66
+  },
+  "mascot": {
+    "enabled": true,
+    "greeting": ["HELLO AGAIN.", "PICK AN APP TO START."],
+    "idle": ["IM HERE.", "IM WAITING...", "LET ME KNOW."]
   },
   "features": {
     "page_dots": false,

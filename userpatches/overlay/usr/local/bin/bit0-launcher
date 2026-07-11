@@ -26,7 +26,7 @@ import time
 sys.path.insert(0, '/usr/local/lib')
 from bit0.evdev import (EV_SYN, EV_KEY, EV_REL, EV_ABS,
                         REL_X, REL_Y, ABS_X, ABS_Y, BTN_LEFT, BTN_TOUCH,
-                        KEY_ESC, KEY_ENTER, KEY_KPENTER, KEY_BACK,
+                        KEY_ESC, KEY_ENTER, KEY_KPENTER, KEY_BACK, KEY_SPACE,
                         KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT,
                         EVENT_SIZE, unpack_event, find_event, grab)
 from bit0.fb import Screen, fullscreen_message, GLYPH_H
@@ -38,6 +38,8 @@ from bit0.registry import load_apps
 from bit0.ui import theme
 from bit0.ui.assets import load_icon, GEAR_FALLBACK, BACK_FALLBACK
 from bit0.ui.core import Page, Router
+from bit0.ui.mascot import (Mascot, MascotCard, load_mascots,
+                            read_selected, save_selected)
 from bit0.ui.widgets import Button, LiveLabel, Slider, AppGrid, vstack, hstack
 
 MOUSE_NAME = 'Lyra UART Mouse'
@@ -49,7 +51,7 @@ FRAME_S = 0.033  # ~30 fps compose/flush cap (the SPI panel link is slow)
 
 # ENTER-like keys never act on autorepeat (no repeat-activation); arrows
 # do repeat for hold-to-scrub sliders and menu movement (audit 6.4)
-NO_REPEAT = (KEY_ENTER, KEY_KPENTER, KEY_ESC, KEY_BACK)
+NO_REPEAT = (KEY_ENTER, KEY_KPENTER, KEY_SPACE, KEY_ESC, KEY_BACK)
 
 
 _devs = {}  # live input fds; module-global so the atexit hook reaches them
@@ -156,8 +158,10 @@ def build_pages(scr, state, th):
         {'order': 90, 'label': 'SD CARD', 'app': (lambda: run_sdcard(scr))},
     ] + load_apps()
     entries.sort(key=lambda e: (e['order'], e['label']))
-    bottom = scr.h - th.mascot_strip  # 6.5 reserves this for the mascot
-    grid = AppGrid(entries, x=6, y=40, w=scr.w - 12, h=bottom - 50)
+    # the mascot strip is reserved on the main page only; the bubble
+    # floats above page content and repaints via full recompose
+    grid = AppGrid(entries, x=6, y=40, w=scr.w - 12,
+                   h=scr.h - th.mascot_strip - 50)
     gear = Button(icon=load_icon('gear.pbm') or GEAR_FALLBACK,
                   action={'push': 'settings'},
                   x=scr.w - 36, y=6, w=30, h=26)
@@ -192,7 +196,7 @@ def build_pages(scr, state, th):
         Button('POWER OFF', action={'cmd': [['sync'], ['poweroff']],
                                     'msg': 'POWERING OFF'})],
         x=(scr.w - th.button_w) // 2, w=th.button_w,
-        top=volrow_y + volrow_h + 10, bottom=bottom - 10,
+        top=volrow_y + volrow_h + 10, bottom=scr.h - 10,
         max_h=th.button_max_h)
     back = Button(icon=load_icon('back.pbm') or BACK_FALLBACK,
                   action={'pop': True}, x=6, y=6, w=30, h=26)
@@ -265,7 +269,8 @@ def main():
     scr.set_cursor(load_icon('cursor.pgm'))  # None keeps the built-in arrow
     # splash only on the first start after boot (/tmp is tmpfs); respawns
     # and manual restarts go straight to the menu
-    if not os.path.exists('/tmp/.bit0-splash-shown'):
+    first_boot = not os.path.exists('/tmp/.bit0-splash-shown')
+    if first_boot:
         splash(scr, th)
         open('/tmp/.bit0-splash-shown', 'w').close()
 
@@ -273,7 +278,28 @@ def main():
     # vol is None until first read (on settings-page entry).
     state = {'vol': None, 'vol_mtime': None,
              'bri': get_brightness(), 'bri_pending': None}
-    router = Router(build_pages(scr, state, th), root='main')
+    pages = build_pages(scr, state, th)
+    mascot = None
+    if th.mascot_enabled:
+        pool = load_mascots()
+        sel = next((m for m in pool if m['id'] == read_selected()), None)
+        box = th.mascot_strip - 6
+        mascot = Mascot(sel or pool[0],
+                        x=scr.w - box - 4, y=scr.h - box - 4, w=box, h=box)
+        pages['main'].widgets.append(mascot)  # last in the reserved band
+        if sel is None:
+            # first boot (or wiped state): pick a companion; the card's
+            # action persists the choice and pops back to main
+            cw, chh, gap = 110, 150, 24
+            x0 = (scr.w - 2 * cw - gap) // 2
+            cards = [MascotCard(m, x=x0 + i * (cw + gap), y=48,
+                                w=cw, h=chh) for i, m in enumerate(pool[:2])]
+            pages['choose'] = Page('choose', 'CHOOSE YOUR MASCOT', cards)
+    router = Router(pages, root='main', overlay=mascot)
+    if mascot and 'choose' in pages:
+        router.push('choose')
+    elif mascot and first_boot and th.mascot_greeting:
+        mascot.say(list(th.mascot_greeting))
 
     cx, cy = scr.w // 2, scr.h // 2
     devs = open_inputs()
@@ -294,6 +320,12 @@ def main():
         if state['bri_pending'] is not None:
             state['bri'] = set_brightness(state['bri_pending'])
             state['bri_pending'] = None
+        dirty = pg.dirty_widgets()
+        if not full and router.overlay and router.overlay.bubble_visible \
+                and any(w is not router.overlay for w in dirty):
+            # a widget under the floating bubble changed: recompose the
+            # whole scene so draw order stays bubble-on-top
+            full = True
         if full:
             pg.compose(scr)
             scr.flush()  # full-frame flush covers the old cursor patch too
@@ -302,7 +334,8 @@ def main():
             for i, w in enumerate(pg.widgets):
                 if w.dirty:
                     w.draw(scr, i == pg.focus)
-                    scr.flush(*w.flush_rect())
+                    for rect in w.flush_rects():
+                        scr.flush(*rect)
                     w.dirty = False
         if cursor_on:
             scr.draw_cursor(cx, cy)
@@ -336,6 +369,13 @@ def main():
             timeout = 0.5
         else:
             timeout = 5
+        if mascot and mascot in pg.widgets \
+                and mascot.next_deadline() is not None:
+            # wake for the next sprite frame (talk/blink sprites, when the
+            # mascot has them); render-on-dirty turns the tick into a
+            # repaint (audit 6.5)
+            timeout = min(timeout, max(
+                0.0, mascot.next_deadline() - time.monotonic()))
         r, _, _ = select.select(list(devs), [], [], timeout)
         now = time.monotonic()
         if r:
@@ -348,6 +388,9 @@ def main():
             devs = open_inputs()
             last_input = now
             continue
+
+        if mascot and mascot in pg.widgets:
+            mascot.tick(now)
 
         if pg.name == 'settings':
             # sync the volume cache with changes made behind our back
@@ -428,9 +471,17 @@ def main():
             for code, val in keys:
                 if val == 2 and code in NO_REPEAT:
                     continue  # no activation on autorepeat
+                if router.intercept_key(code):
+                    full = True  # bubble advanced/dismissed: repaint scene
+                    continue
                 a = page_key(pg, code)
                 if a and act is None:
                     act = a  # one action per tick; later keys still navigate
+
+        if clicked and router.intercept_click():
+            clicked = False  # bubble advanced: click goes no further
+            held = False
+            full = True
 
         if moved or clicked:
             if not cursor_on:  # pointer motion brings the cursor back
@@ -477,6 +528,14 @@ def main():
                 except Exception as exc:
                     print(f'bit0-launcher: act: {exc}', flush=True)
                 pg.mark_values()
+            elif 'mascot' in act:
+                d = act['mascot']
+                save_selected(d['id'])
+                mascot.set_definition(d)
+                pg = router.pop()
+                full = True
+                mascot.say(['HI. I AM %s.' % d['name']]
+                           + list(th.mascot_greeting))
             elif 'launch' in act:
                 entry = act['launch']
                 print(f'bit0-launcher: launching {entry["label"]}', flush=True)

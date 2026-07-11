@@ -1,0 +1,4 @@
+# Mascot definition; sprites are sibling <emotion>.pbm files
+# (idle.pbm required; talk/blink/happy/... animate or show
+# via say(..., emotion=...) once added).
+name = "PIXEL"
