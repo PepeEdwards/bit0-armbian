@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """Bit-0 boot launcher.
 
-Draws a splash + button menu (Terminal / PICO-8 / SD Card / settings)
-straight to /dev/fb0 (RGB565) and reads the Lyra UART Mouse (relative) and
-Lyra Touch Mouse (absolute, from the touch-mouse daemon) for pointer input.
+Owns only: startup guards (singleton, SD release, stale-app cleanup),
+page construction from the app registry + built-ins, and the input/render
+event loop. Widgets/pages/router live in bit0.ui, drawing primitives in
+bit0.fb, app launching in bit0.apps, the TOML registry in bit0.registry.
 
-Drawing, app launching, and SD handling live in the bit0 lib
-(/usr/local/lib/bit0); this file owns the pages, widgets, and event loop.
-
-Rendering model: the loop drains all pending input, updates state (marking
-widgets dirty), then composes and flushes at most once per tick (~30 fps,
-with a final render when input goes idle). Widgets never flush themselves;
-control values (volume/brightness) come from a cache, never from
-sysfs/subprocess in the draw path.
+Rendering model (audit 6.2): the loop drains all pending input, updates
+state (marking widgets dirty), then composes and flushes at most once per
+tick (~30 fps, with a final render when input goes idle). Widgets never
+flush themselves; control values (volume/brightness) come from a State
+cache, never from sysfs/subprocess in the draw path.
 
 Started at boot by bit0-launcher.service.
 """
@@ -29,13 +27,14 @@ from bit0.evdev import (EV_SYN, EV_KEY, EV_REL, EV_ABS,
                         REL_X, REL_Y, ABS_X, ABS_Y, BTN_LEFT, BTN_TOUCH,
                         EVENT_SIZE, unpack_event, find_event)
 from bit0.fb import (Screen, fullscreen_message, GLYPH_H,
-                     GEAR_ICON, BACK_ICON,
-                     C_BG, C_TITLE, C_BTN, C_BTNHI, C_TEXT, C_TEXTHI,
-                     C_BLACK, C_WHITE)
-from bit0.apps import (kill_stale, run_pico8, run_terminal, run_calibrate,
+                     GEAR_ICON, BACK_ICON, C_TITLE, C_BLACK, C_WHITE)
+from bit0.apps import (kill_stale, launch_entry, run_terminal, run_calibrate,
                        get_volume, vol_set, vol_state_read,
                        get_brightness, set_brightness)
 from bit0.sdspi import run_sdcard, sd_release
+from bit0.registry import load_apps
+from bit0.ui.core import Page, Router
+from bit0.ui.widgets import Button, LiveLabel, Slider, AppGrid, vstack, hstack
 
 MOUSE_NAME = 'Lyra UART Mouse'
 TOUCH_NAME = 'Lyra Touch Mouse'
@@ -66,8 +65,6 @@ def close_inputs(devs):
             pass
 
 
-# ── UI ───────────────────────────────────────────────────────────────────────
-
 def splash(scr):
     scr.fill_rect(0, 0, scr.w, scr.h, C_BLACK)
     s = 6
@@ -79,38 +76,10 @@ def splash(scr):
     time.sleep(2.2)
 
 
-BTN_W = 260
-BTN_TOP = 34            # below the title
-BTN_BOTTOM_PAD = 10     # margin above the screen bottom
+def build_pages(scr, state):
+    """Main menu (registry-driven tile grid) + settings. Control widgets
+    read/write the State cache, never sysfs/subprocess in the draw path."""
 
-
-def column_from(scr, entries, top):
-    """Distribute entries evenly from `top` down to the screen bottom."""
-    n = len(entries)
-    x = (scr.w - BTN_W) // 2
-    avail = (scr.h - BTN_BOTTOM_PAD) - top
-    slot = avail / n
-    gap = min(16.0, slot * 0.28)
-    bh = min(int(slot - gap), 48)
-    out = []
-    for i, (lab, extra) in enumerate(entries):
-        y = int(top + i * slot + (slot - bh) / 2)
-        out.append({'label': lab, **extra, 'x': x, 'y': y, 'w': BTN_W, 'h': bh})
-    return out
-
-
-def column(scr, entries):
-    return column_from(scr, entries, BTN_TOP)
-
-
-# Brightness slider geometry on the settings page (and its touch target).
-SLIDER_X, SLIDER_Y, SLIDER_H = 24, 46, 24
-VOLROW_Y, VOLROW_H = SLIDER_Y + SLIDER_H + 18, 30
-
-
-def make_pages(scr, state):
-    """Build the page dicts. Control widgets read/write `state` (the value
-    cache) instead of hitting sysfs/subprocess in the draw path."""
     def vol_step(d):
         base = state['vol'] if state['vol'] is not None else get_volume()
         # optimistic: vol_set returns the clamped pct; the helper runs
@@ -121,137 +90,39 @@ def make_pages(scr, state):
         return '--' if state['vol'] is None else '%d%%' % state['vol']
 
     def bri_set(pct):
-        # cache now, write sysfs once per render tick (set_brightness's
-        # return refreshes the cache with the clamped value before drawing)
+        # cache now; the render tick writes sysfs (at most once per frame)
+        # and refreshes the cache with the clamped value before drawing
         state['bri_pending'] = pct
 
-    main = column(scr, [('TERMINAL', {'app': run_terminal}),
-                        ('PICO-8', {'app': (lambda: run_pico8(scr))}),
-                        ('SD CARD', {'app': (lambda: run_sdcard(scr))})])
-    main.append({'label': '', 'icon': GEAR_ICON, 'goto': 'settings',
-                 'x': scr.w - 36, 'y': 6, 'w': 30, 'h': 26})
-    slider = {'slider': True, 'name': 'BRIGHTNESS',
-              'get': (lambda: state['bri']), 'set': bri_set,
-              'x': SLIDER_X, 'y': SLIDER_Y,
-              'w': scr.w - 2 * SLIDER_X, 'h': SLIDER_H}
-    # volume: [VOL -]  live %  [VOL +]
-    gap = 8
-    bw3 = (scr.w - 2 * SLIDER_X - 2 * gap) // 3
-    volrow = [
-        {'label': 'VOL -', 'act': (lambda: vol_step(-10)),
-         'x': SLIDER_X, 'y': VOLROW_Y, 'w': bw3, 'h': VOLROW_H},
-        {'display': vol_text,
-         'x': SLIDER_X + bw3 + gap, 'y': VOLROW_Y, 'w': bw3, 'h': VOLROW_H},
-        {'label': 'VOL +', 'act': (lambda: vol_step(+10)),
-         'x': SLIDER_X + 2 * (bw3 + gap), 'y': VOLROW_Y, 'w': bw3, 'h': VOLROW_H},
-    ]
-    settings = [slider] + volrow + column_from(scr, [
-        ('CALIBRATE', {'app': run_calibrate}),
-        ('RESTART', {'cmd': [['sync'], ['reboot']], 'msg': 'RESTARTING...'}),
-        ('POWER OFF', {'cmd': [['sync'], ['poweroff']], 'msg': 'POWERING OFF'})],
-        top=VOLROW_Y + VOLROW_H + 10)
-    # back arrow top-left (mirrors the gear top-right on the main page)
-    settings.append({'label': '', 'icon': BACK_ICON, 'goto': 'main',
-                     'x': 6, 'y': 6, 'w': 30, 'h': 26})
+    # main menu: built-ins and TOML registry apps share one entry shape
+    entries = [
+        {'order': 10, 'label': 'TERMINAL', 'app': run_terminal},
+        {'order': 90, 'label': 'SD CARD', 'app': (lambda: run_sdcard(scr))},
+    ] + load_apps()
+    entries.sort(key=lambda e: (e['order'], e['label']))
+    grid = AppGrid(entries, x=6, y=40, w=scr.w - 12, h=scr.h - 50)
+    gear = Button(icon=GEAR_ICON, action={'push': 'settings'},
+                  x=scr.w - 36, y=6, w=30, h=26)
+    main = Page('main', 'BIT-0', [grid, gear])
+
+    slider = Slider('BRIGHTNESS', getter=(lambda: state['bri']),
+                    setter=bri_set, x=24, y=46, w=scr.w - 48, h=24)
+    volrow = hstack([Button('VOL -', action={'act': (lambda: vol_step(-10))}),
+                     LiveLabel(vol_text),
+                     Button('VOL +', action={'act': (lambda: vol_step(+10))})],
+                    x=24, y=88, w=scr.w - 48, h=30, gap=8)
+    col = vstack([
+        Button('CALIBRATE',
+               action={'launch': {'label': 'CALIBRATE', 'app': run_calibrate}}),
+        Button('RESTART', action={'cmd': [['sync'], ['reboot']],
+                                  'msg': 'RESTARTING...'}),
+        Button('POWER OFF', action={'cmd': [['sync'], ['poweroff']],
+                                    'msg': 'POWERING OFF'})],
+        x=(scr.w - 260) // 2, w=260, top=128, bottom=scr.h - 10)
+    back = Button(icon=BACK_ICON, action={'pop': True}, x=6, y=6, w=30, h=26)
+    settings = Page('settings', 'SETTINGS', [slider] + volrow + col + [back])
+
     return {'main': main, 'settings': settings}
-
-
-def slider_pct(b, x):
-    """Percent for a pointer x over slider b (quantized to 5%)."""
-    pct = (x - b['x']) * 100.0 / max(1, b['w'])
-    return max(0, min(100, int(round(pct / 5.0) * 5)))
-
-
-def widget_rect(b):
-    """Scene rectangle a widget composes into (the slider knob overhangs
-    the track by 3 px top/bottom)."""
-    if b.get('slider'):
-        return (b['x'], b['y'] - 4, b['w'] + 4, b['h'] + 8)
-    return (b['x'], b['y'], b['w'], b['h'])
-
-
-def draw_slider(scr, b, hover):
-    """Generic slider: label, track + fill + knob, and %. Value comes from
-    b['get'] (a cache read); b['set'] applies drags/taps. Composes into the
-    scene only - the render tick flushes."""
-    pct = b['get']()
-    bx, by, bw, bh = b['x'], b['y'], b['w'], b['h']
-    # clear the FULL widget rect: the knob overhangs the track by 3 px
-    # top/bottom and its previous position would otherwise survive a
-    # partial redraw as a border trace
-    scr.fill_rect(*widget_rect(b), C_BG)
-    scr.fill_rect(bx, by, bw, bh, C_WHITE)                # border
-    scr.fill_rect(bx + 1, by + 1, bw - 2, bh - 2, C_BTN)  # groove
-    fillw = int((bw - 2) * pct / 100)
-    if fillw > 0:
-        scr.fill_rect(bx + 1, by + 1, fillw, bh - 2,
-                      C_BTNHI if hover else C_TITLE)
-    kx = bx + min(fillw, bw - 4)
-    scr.fill_rect(kx, by - 3, 4, bh + 6, C_WHITE)         # knob
-    # label inside the bar (a label above it collided with the back button)
-    scr.text(b['name'], bx + 8, by + (bh - GLYPH_H * 2) // 2, 2, C_WHITE)
-    txt = str(pct)
-    scr.text(txt, bx + bw - scr.text_width(txt, 2) - 6,
-             by + (bh - GLYPH_H * 2) // 2, 2, C_TEXT)
-
-
-def draw_button(scr, b, hover):
-    """Compose one widget into the scene buffer. Never flushes: the render
-    tick is the single flush point (structural fix for residual pixels).
-    Invariant: composing must fully repaint widget_rect(b) - anything a
-    widget ever drew outside what it repaints becomes a stale trace when
-    the rect is flushed alone."""
-    if b.get('slider'):
-        draw_slider(scr, b, hover)
-        return
-    if b.get('display'):
-        # borderless live-value text (e.g. current volume between VOL -/+)
-        scr.fill_rect(b['x'], b['y'], b['w'], b['h'], C_BG)
-        s = 2
-        txt = b['display']()
-        tw = scr.text_width(txt, s)
-        scr.text(txt, b['x'] + (b['w'] - tw) // 2,
-                 b['y'] + (b['h'] - GLYPH_H * s) // 2, s, C_TEXT)
-        return
-    face = C_BTNHI if hover else C_BTN
-    txt = C_TEXTHI if hover else C_TEXT
-    scr.fill_rect(b['x'], b['y'], b['w'], b['h'], C_WHITE)
-    scr.fill_rect(b['x'] + 2, b['y'] + 2, b['w'] - 4, b['h'] - 4, face)
-    if b.get('icon'):
-        icon = b['icon']
-        iw, ih = len(icon[0]), len(icon)
-        ox = b['x'] + (b['w'] - iw) // 2
-        oy = b['y'] + (b['h'] - ih) // 2
-        for gy, line in enumerate(icon):
-            for gx, ch in enumerate(line):
-                if ch == '#':
-                    scr.fill_rect(ox + gx, oy + gy, 1, 1, txt)
-    else:
-        s = 2
-        tw = scr.text_width(b['label'], s)
-        scr.text(b['label'], b['x'] + (b['w'] - tw) // 2,
-                 b['y'] + (b['h'] - GLYPH_H * s) // 2, s, txt)
-
-
-def draw_page(scr, name, btns, hover_idx):
-    # Compose the whole page in the scene buffer, then flush once: flushing
-    # background and buttons separately briefly showed mixed old/new frames
-    # ("artifacts") on page changes.
-    scr.fill_rect(0, 0, scr.w, scr.h, C_BG)
-    title = 'BIT-0' if name == 'main' else name.upper()
-    s = 2
-    tw = scr.text_width(title, s)
-    scr.text(title, (scr.w - tw) // 2, 12, s, C_TITLE)
-    for i, b in enumerate(btns):
-        draw_button(scr, b, i == hover_idx)
-    scr.flush()
-
-
-def hit(btns, x, y):
-    for i, b in enumerate(btns):
-        if b['x'] <= x < b['x'] + b['w'] and b['y'] <= y < b['y'] + b['h']:
-            return i
-    return -1
 
 
 _lock = None  # must stay open for the process lifetime
@@ -301,42 +172,38 @@ def main():
     # Value cache: widgets draw from here, never from sysfs/subprocess.
     # vol is None until first read (on settings-page entry).
     state = {'vol': None, 'vol_mtime': None,
-             'bri': get_brightness(), 'bri_pending': None,
-             'slider_last': None}
-    pages = make_pages(scr, state)
-    page = 'main'
-    btns = pages[page]
+             'bri': get_brightness(), 'bri_pending': None}
+    router = Router(build_pages(scr, state), root='main')
 
     cx, cy = scr.w // 2, scr.h // 2
-    hover = -1
     devs = open_inputs()
     print(f'bit0-launcher: inputs: {sorted(devs.values())}', flush=True)
 
-    # Render-tick state: `full` = whole page recompose pending, `dirty` =
-    # widget indices to recompose, `cursor_dirty` = pointer moved.
-    dirty = set()
-    full = True
-    cursor_dirty = False
+    full = True           # full-page recompose pending
+    cursor_dirty = False  # pointer moved since the last render
     last_render = 0.0
     scr._last_cur = (cx, cy)
 
     def render():
         """Single flush point per tick: apply deferred sysfs writes, compose
         dirty widgets, flush their rects (or the whole page), cursor last."""
-        nonlocal dirty, full, cursor_dirty, last_render
+        nonlocal full, cursor_dirty, last_render
+        pg = router.page
         if state['bri_pending'] is not None:
             state['bri'] = set_brightness(state['bri_pending'])
             state['bri_pending'] = None
         if full:
-            draw_page(scr, page, btns, hover)  # full-frame flush covers the
-        else:                                  # old cursor patch too
+            pg.compose(scr)
+            scr.flush()  # full-frame flush covers the old cursor patch too
+        else:
             scr.erase_cursor(*scr._last_cur)
-            for i in dirty:
-                draw_button(scr, btns[i], i == hover)
-                scr.flush(*widget_rect(btns[i]))
+            for i, w in enumerate(pg.widgets):
+                if w.dirty:
+                    w.draw(scr, i == pg.hover)
+                    scr.flush(*w.flush_rect())
+                    w.dirty = False
         scr.draw_cursor(cx, cy)
         scr._last_cur = (cx, cy)
-        dirty = set()
         full = False
         cursor_dirty = False
         last_render = time.monotonic()
@@ -357,11 +224,12 @@ def main():
         # budget when a render is pending; on the settings page a 0.5 s
         # poll of the bit0-vol state file (hotkey volume changes never
         # reach us as input events); else the 5 s rescan idle.
-        pending = full or dirty or cursor_dirty \
+        pg = router.page
+        pending = full or cursor_dirty or pg.dirty_widgets() \
             or state['bri_pending'] is not None
         if pending:
             timeout = max(0.0, FRAME_S - (time.monotonic() - last_render))
-        elif page == 'settings':
+        elif pg.name == 'settings':
             timeout = 0.5
         else:
             timeout = 5
@@ -378,16 +246,15 @@ def main():
             last_input = now
             continue
 
-        if page == 'settings':
+        if pg.name == 'settings':
             # sync the volume cache with changes made behind our back
             # (volume keys handled inside uart-hid-bridge, triggerhappy
             # mute): cheap tmpfs stat+read, no process spawn
             st = vol_state_read()
             if st and st[0] != state['vol_mtime']:
                 state['vol_mtime'], state['vol'] = st
-                for i, bb in enumerate(btns):
-                    if bb.get('display'):
-                        dirty.add(i)
+                pg.mark_values()
+
         clicked = False
         moved = False
         lost = False
@@ -448,37 +315,18 @@ def main():
 
         if moved or clicked:
             cursor_dirty = True
-            new_hover = hit(btns, cx, cy)
-            on_slider = new_hover >= 0 and btns[new_hover].get('slider')
-            if on_slider and (clicked or held):
-                # tap or drag on the slider: cache the value now, write
-                # sysfs and redraw on the next render tick
-                target = slider_pct(btns[new_hover], cx)
-                if target != state['slider_last']:
-                    btns[new_hover]['set'](target)
-                    state['slider_last'] = target
-                    dirty.add(new_hover)
-                if hover >= 0 and hover != new_hover:
-                    dirty.add(hover)
-                    dirty.add(new_hover)
-                hover = new_hover
-                clicked = False  # consume: don't treat as a button activation
-            else:
-                state['slider_last'] = None
-                if new_hover != hover:
-                    if hover >= 0:
-                        dirty.add(hover)
-                    if new_hover >= 0:
-                        dirty.add(new_hover)
-                    hover = new_hover
+            pg.pointer(cx, cy)
+            w = pg.hovered()
+            # tap or drag consumed by the widget (slider scrubbing)
+            if w and (clicked or held) and w.on_drag(cx, cy):
+                clicked = False
 
-        if clicked and hover >= 0:
-            b = btns[hover]
-            if 'goto' in b:
-                page = b['goto']
-                btns = pages[page]
-                hover = -1
-                if page == 'settings':
+        if clicked:
+            w = pg.hovered()
+            act = (w.on_click(cx, cy) if w else None) or {}
+            if 'push' in act:
+                pg = router.push(act['push'])
+                if pg.name == 'settings':
                     # one blocking read per entry; every redraw after this
                     # uses the cache (a VOL click costs 1 spawn, not 3).
                     # bit0-vol get also publishes the state file: snap its
@@ -488,35 +336,34 @@ def main():
                     if st:
                         state['vol_mtime'] = st[0]
                 full = True
-            elif 'cmd' in b:
-                print(f'bit0-launcher: {b["msg"]}', flush=True)
-                fullscreen_message(scr, b['msg'])
-                for argv in b['cmd']:
+            elif 'pop' in act:
+                pg = router.pop()
+                full = True
+            elif 'cmd' in act:
+                print(f'bit0-launcher: {act["msg"]}', flush=True)
+                fullscreen_message(scr, act['msg'])
+                for argv in act['cmd']:
                     subprocess.call(argv)
                 time.sleep(60)  # init takes over from here
-            elif 'act' in b:
-                # in-page action (e.g. volume +/-): run it, then refresh the
-                # value widgets (slider/display) that read from the cache
+            elif 'act' in act:
+                # in-page action (volume +/-): run it, then refresh the
+                # widgets that render cache values
                 try:
-                    b['act']()
+                    act['act']()
                 except Exception as exc:
                     print(f'bit0-launcher: act: {exc}', flush=True)
-                for i, bb in enumerate(btns):
-                    if bb.get('display') or bb.get('slider'):
-                        dirty.add(i)
-            elif 'app' in b:
-                label = b['label']
-                print(f'bit0-launcher: launching {label}', flush=True)
+                pg.mark_values()
+            elif 'launch' in act:
+                entry = act['launch']
+                print(f'bit0-launcher: launching {entry["label"]}', flush=True)
                 fullscreen_message(scr, 'LOADING...')
                 close_inputs(devs)
                 try:
-                    b['app']()
+                    launch_entry(entry, scr)
                 except Exception as exc:
-                    print(f'bit0-launcher: {label}: {exc}', flush=True)
+                    print(f'bit0-launcher: {entry["label"]}: {exc}', flush=True)
                 devs = open_inputs()
-                page = 'main'
-                btns = pages[page]
-                hover = -1
+                pg = router.reset()
                 ax = ay = None
                 full = True
 
@@ -524,9 +371,10 @@ def main():
         # during pointer/drag floods; when select timed out (input idle) or
         # on a click/page change, render immediately so the final state and
         # activations never wait a frame.
-        if full or dirty or cursor_dirty or state['bri_pending'] is not None:
-            idle = not r
-            if idle or clicked or full \
+        pg = router.page
+        if full or cursor_dirty or pg.dirty_widgets() \
+                or state['bri_pending'] is not None:
+            if not r or clicked or full \
                     or (time.monotonic() - last_render) >= FRAME_S:
                 render()
 

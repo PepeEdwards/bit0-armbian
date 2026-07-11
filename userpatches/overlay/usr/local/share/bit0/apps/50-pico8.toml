@@ -1,0 +1,9 @@
+# PICO-8 main-menu entry (audit 6.1). The leading number in the filename
+# sets menu order (built-ins: TERMINAL=10, SD CARD=90). All launch logic
+# (env, GL workarounds, stretch shim) lives in /usr/local/bin/pico8-launch;
+# PICO-8 itself is proprietary and 'requires' degrades to an on-screen
+# NOT INSTALLED message when it is absent (docs/PICO8.md).
+label = "PICO-8"
+exec = ["/usr/local/bin/pico8-launch"]
+requires = "/root/pico-8/pico8_dyn"
+kill_stale = ["pico8_dyn"]

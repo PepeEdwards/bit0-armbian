@@ -16,15 +16,16 @@ OVL="$REPO/userpatches/overlay"
 ADB=adb
 command -v adb >/dev/null 2>&1 || ADB=adb.exe
 
-echo "==> pushing launcher + helpers + lib"
+echo "==> pushing launcher + helpers + lib + share"
+# local bytecode (from py_compile checks) must not ride along
+find "$OVL/usr/local/lib/bit0" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
 "$ADB" push "$OVL/usr/local/bin/bit0-launcher" /usr/local/bin/
 "$ADB" push "$OVL/usr/local/bin/bit0-vol" /usr/local/bin/
-for f in "$OVL"/usr/local/lib/bit0/*.py; do
-    "$ADB" push "$f" /usr/local/lib/bit0/
-done
+"$ADB" push "$OVL/usr/local/lib/bit0" /usr/local/lib/
+"$ADB" push "$OVL/usr/local/share/bit0" /usr/local/share/
 "$ADB" shell chmod +x /usr/local/bin/bit0-launcher /usr/local/bin/bit0-vol
 # stale bytecode from the previous lib would shadow the pushed sources
-"$ADB" shell rm -rf /usr/local/lib/bit0/__pycache__
+"$ADB" shell "find /usr/local/lib/bit0 -name __pycache__ -type d -exec rm -rf {} +"
 # sync BEFORE restarting: if the new launcher crashes and the device gets
 # power-cycled, unsynced pushes read back as 0xFF flash garbage
 "$ADB" shell sync

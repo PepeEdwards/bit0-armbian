@@ -21,18 +21,23 @@ def kill_stale(*names):
                         stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
 
 
-def run_pico8(scr=None):
-    # pico-8 is proprietary and only present if it was in the build overlay
-    # or pushed with install-pico8.sh; see docs/PICO8.md. All launch logic
-    # (env, GL workarounds, stretch shim) lives in /usr/local/bin/pico8-launch.
-    if not os.path.exists('/root/pico-8/pico8_dyn'):
+def launch_entry(entry, scr=None):
+    """Single launch path for registry and built-in menu entries (audit
+    6.1). A missing 'requires' path shows the on-screen NOT INSTALLED
+    message - never a silent bounce back to the menu. (PICO-8 is the
+    canonical case: proprietary, only present if it was in the build
+    overlay or pushed with install-pico8.sh; see docs/PICO8.md.)"""
+    req = entry.get('requires')
+    if req and not os.path.exists(req):
         if scr:
-            fullscreen_message(scr, 'PICO-8 NOT INSTALLED')
+            fullscreen_message(scr, f"{entry['label']} NOT INSTALLED")
             time.sleep(2.5)
         return
-    kill_stale('pico8_dyn')
-    subprocess.call(['/usr/local/bin/pico8-launch'],
-                    env=dict(os.environ, HOME='/root'))
+    kill_stale(*entry.get('kill_stale', []))
+    if entry.get('app'):
+        entry['app']()
+    else:
+        subprocess.call(entry['exec'], env=dict(os.environ, HOME='/root'))
 
 
 def run_pico8_cart(cart):

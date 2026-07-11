@@ -74,10 +74,13 @@ GLYPH_W, GLYPH_H = 6, 7
 def _glyph_blits(ch, scale, color):
     """Pre-rendered opaque spans for one glyph at (scale, color): a list of
     (dy_px, dx_px, row_bytes) blitted with slice assignment. Only set pixels
-    get spans, so text stays transparent over any background."""
+    get spans, so text stays transparent over any background. scale may be
+    fractional (e.g. 1.5): glyph pixels map to rounded bounds, so identical
+    to the integer path when scale is whole."""
     px = struct.pack('<H', color)
     blits = []
     for gy, line in enumerate(FONT.get(ch, FONT[' '])):
+        y0, y1 = round(gy * scale), round((gy + 1) * scale)
         gx = 0
         while gx < len(line):
             if line[gx] != '#':
@@ -86,9 +89,10 @@ def _glyph_blits(ch, scale, color):
             start = gx
             while gx < len(line) and line[gx] == '#':
                 gx += 1
-            row = px * ((gx - start) * scale)
-            for sy in range(scale):
-                blits.append(((gy * scale + sy), start * scale, row))
+            x0 = round(start * scale)
+            row = px * (round(gx * scale) - x0)
+            for sy in range(y0, y1):
+                blits.append((sy, x0, row))
     return blits
 
 ARROW = [
@@ -153,14 +157,15 @@ class Screen:
             self.scene[off:off + w * 2] = row
 
     def text(self, s, x, y, scale, color):
+        adv = round(GLYPH_W * scale)
         for ch in s:
             for dy, dx, row in _glyph_blits(ch, scale, color):
                 off = ((y + dy) * self.w + x + dx) * 2
                 self.scene[off:off + len(row)] = row
-            x += GLYPH_W * scale
+            x += adv
 
     def text_width(self, s, scale):
-        return len(s) * GLYPH_W * scale
+        return len(s) * round(GLYPH_W * scale)
 
     def flush(self, x=0, y=0, w=None, h=None):
         w = self.w if w is None else w
