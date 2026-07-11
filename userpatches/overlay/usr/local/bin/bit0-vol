@@ -4,12 +4,22 @@
 # this instead of carrying its own amixer incantation.
 # 'Master' is the softvol control from /etc/asound.conf; it exists only
 # after bit0-alsa-init has instantiated it (first open of the softvol PCM).
+# After every change the resulting pct is published to $STATE (tmpfs) so the
+# launcher settings page can reflect hotkey volume changes — those are
+# consumed inside uart-hid-bridge, so no input event ever reaches the
+# launcher — with a cheap file read instead of spawning amixer.
+set -eu
 STEP=10
+STATE=/run/bit0-vol.pct
+
+cur() { amixer get Master 2>/dev/null | grep -o '\[[0-9]*%\]' | head -1 | tr -d '[]%'; }
+pub() { cur > "$STATE" || true; }
+
 case "${1:-}" in
-	up)    exec amixer -q set Master "${STEP}%+" ;;
-	down)  exec amixer -q set Master "${STEP}%-" ;;
-	mute)  exec amixer -q set Master 0% ;;   # softvol has no playback switch
-	set)   exec amixer -q set Master "${2:?usage: bit0-vol set <pct>}%" ;;
-	get)   amixer get Master 2>/dev/null | grep -o '\[[0-9]*%\]' | head -1 | tr -d '[]%' ;;
+	up)    amixer -q set Master "${STEP}%+"; pub ;;
+	down)  amixer -q set Master "${STEP}%-"; pub ;;
+	mute)  amixer -q set Master 0%; pub ;;   # softvol has no playback switch
+	set)   amixer -q set Master "${2:?usage: bit0-vol set <pct>}%"; pub ;;
+	get)   pub; cat "$STATE" ;;
 	*)     echo "usage: bit0-vol {up|down|mute|get|set <pct>}" >&2; exit 1 ;;
 esac

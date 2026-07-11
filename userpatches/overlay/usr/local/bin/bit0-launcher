@@ -33,7 +33,8 @@ from bit0.fb import (Screen, fullscreen_message, GLYPH_H,
                      C_BG, C_TITLE, C_BTN, C_BTNHI, C_TEXT, C_TEXTHI,
                      C_BLACK, C_WHITE)
 from bit0.apps import (kill_stale, run_pico8, run_terminal, run_calibrate,
-                       get_volume, vol_set, get_brightness, set_brightness)
+                       get_volume, vol_set, vol_state_read,
+                       get_brightness, set_brightness)
 from bit0.sdspi import run_sdcard, sd_release
 
 MOUSE_NAME = 'Lyra UART Mouse'
@@ -175,7 +176,10 @@ def draw_slider(scr, b, hover):
     scene only - the render tick flushes."""
     pct = b['get']()
     bx, by, bw, bh = b['x'], b['y'], b['w'], b['h']
-    scr.fill_rect(bx, by - 18, bw, 16, C_BG)              # clear label area
+    # clear the FULL widget rect, not just the label strip: the knob
+    # overhangs the track by 3 px top/bottom and its previous position
+    # would otherwise survive a partial redraw as a border trace
+    scr.fill_rect(*widget_rect(b), C_BG)
     scr.text(b['name'], bx, by - 18, 2, C_TITLE)
     scr.fill_rect(bx, by, bw, bh, C_WHITE)                # border
     scr.fill_rect(bx + 1, by + 1, bw - 2, bh - 2, C_BTN)  # groove
@@ -192,7 +196,10 @@ def draw_slider(scr, b, hover):
 
 def draw_button(scr, b, hover):
     """Compose one widget into the scene buffer. Never flushes: the render
-    tick is the single flush point (structural fix for residual pixels)."""
+    tick is the single flush point (structural fix for residual pixels).
+    Invariant: composing must fully repaint widget_rect(b) - anything a
+    widget ever drew outside what it repaints becomes a stale trace when
+    the rect is flushed alone."""
     if b.get('slider'):
         draw_slider(scr, b, hover)
         return
@@ -292,7 +299,8 @@ def main():
 
     # Value cache: widgets draw from here, never from sysfs/subprocess.
     # vol is None until first read (on settings-page entry).
-    state = {'vol': None, 'bri': get_brightness(), 'bri_pending': None,
+    state = {'vol': None, 'vol_mtime': None,
+             'bri': get_brightness(), 'bri_pending': None,
              'slider_last': None}
     pages = make_pages(scr, state)
     page = 'main'
@@ -337,6 +345,7 @@ def main():
     ax = ay = None  # latest absolute touch sample
     pend = {'mouse': False, 'touch': False}  # button-down awaiting SYN
     held = False    # pointer button currently down (for slider drag)
+    last_input = time.monotonic()
     while True:
         if not devs:  # nothing to read - retry discovery
             time.sleep(1)
@@ -344,20 +353,40 @@ def main():
             continue
 
         # select timeout = next scheduled deadline: the remaining frame
-        # budget when a render is pending, else the 5 s rescan idle.
+        # budget when a render is pending; on the settings page a 0.5 s
+        # poll of the bit0-vol state file (hotkey volume changes never
+        # reach us as input events); else the 5 s rescan idle.
         pending = full or dirty or cursor_dirty \
             or state['bri_pending'] is not None
         if pending:
             timeout = max(0.0, FRAME_S - (time.monotonic() - last_render))
+        elif page == 'settings':
+            timeout = 0.5
         else:
             timeout = 5
         r, _, _ = select.select(list(devs), [], [], timeout)
-        if not r and not pending and len(set(devs.values())) < 2:
-            # idle and missing a device (e.g. touch daemon started late):
-            # rescan so hot-(re)started devices get picked up
+        now = time.monotonic()
+        if r:
+            last_input = now
+        elif not pending and now - last_input >= 5 \
+                and len(set(devs.values())) < 2:
+            # idle >=5 s and missing a device (e.g. touch daemon started
+            # late): rescan so hot-(re)started devices get picked up
             close_inputs(devs)
             devs = open_inputs()
+            last_input = now
             continue
+
+        if page == 'settings':
+            # sync the volume cache with changes made behind our back
+            # (volume keys handled inside uart-hid-bridge, triggerhappy
+            # mute): cheap tmpfs stat+read, no process spawn
+            st = vol_state_read()
+            if st and st[0] != state['vol_mtime']:
+                state['vol_mtime'], state['vol'] = st
+                for i, bb in enumerate(btns):
+                    if bb.get('display'):
+                        dirty.add(i)
         clicked = False
         moved = False
         lost = False
@@ -450,8 +479,13 @@ def main():
                 hover = -1
                 if page == 'settings':
                     # one blocking read per entry; every redraw after this
-                    # uses the cache (a VOL click costs 1 spawn, not 3)
+                    # uses the cache (a VOL click costs 1 spawn, not 3).
+                    # bit0-vol get also publishes the state file: snap its
+                    # mtime so the poll doesn't immediately re-fire.
                     state['vol'] = get_volume()
+                    st = vol_state_read()
+                    if st:
+                        state['vol_mtime'] = st[0]
                 full = True
             elif 'cmd' in b:
                 print(f'bit0-launcher: {b["msg"]}', flush=True)

@@ -69,6 +69,24 @@ def run_calibrate():
 
 # ── volume (via bit0-vol, the single owner of the amixer invocation) ─────────
 
+VOL_STATE = '/run/bit0-vol.pct'  # bit0-vol publishes the pct here on change
+
+
+def vol_state_read():
+    """(mtime_ns, pct) from the state file bit0-vol publishes after every
+    volume change; None until the first change. Lets the launcher notice
+    hotkey volume changes (consumed inside uart-hid-bridge, so no input
+    event reaches it) without spawning a process. mtime is taken before
+    the read so a racing write is caught on the next poll."""
+    try:
+        mt = os.stat(VOL_STATE).st_mtime_ns
+        with open(VOL_STATE) as f:
+            txt = f.read().strip()
+        return (mt, int(txt)) if txt else None
+    except (OSError, ValueError):
+        return None
+
+
 def get_volume():
     try:
         out = subprocess.check_output([VOL_HELPER, 'get'],
