@@ -1,11 +1,14 @@
-"""Framebuffer drawing for the Bit0 launcher: RGB565 scene buffer, 5x7
-bitmap font, cursor/icons. No DirectFB/SDL dependency, so it coexists with
-whatever the launched apps use."""
+"""Framebuffer drawing for the Bit0 launcher: RGB565 scene buffer, text
+rendering, cursor. No DirectFB/SDL dependency, so it coexists with
+whatever the launched apps use. Font/icon data lives in bit0.ui.assets
+(audit 6.3); the default C_* colors survive here for standalone drawing
+(fullscreen_message) - widgets style themselves from bit0.ui.theme."""
 
 import functools
 import struct
 
 from .evdev import fb_size
+from .ui.assets import FONT
 
 FBDEV = '/dev/fb0'
 
@@ -19,54 +22,6 @@ C_TEXTHI = 0x0000
 C_BLACK  = 0x0000
 C_WHITE  = 0xFFFF
 
-# ── 5x7 font as ASCII art (6th column = spacing) ────────────────────────────
-FONT = {
-    'A': [" ### ", "#   #", "#   #", "#####", "#   #", "#   #", "#   #"],
-    'B': ["#### ", "#   #", "#   #", "#### ", "#   #", "#   #", "#### "],
-    'C': [" ####", "#    ", "#    ", "#    ", "#    ", "#    ", " ####"],
-    'D': ["#### ", "#   #", "#   #", "#   #", "#   #", "#   #", "#### "],
-    'E': ["#####", "#    ", "#    ", "#### ", "#    ", "#    ", "#####"],
-    'G': [" ####", "#    ", "#    ", "#  ##", "#   #", "#   #", " ####"],
-    'H': ["#   #", "#   #", "#   #", "#####", "#   #", "#   #", "#   #"],
-    'I': [" ### ", "  #  ", "  #  ", "  #  ", "  #  ", "  #  ", " ### "],
-    'L': ["#    ", "#    ", "#    ", "#    ", "#    ", "#    ", "#####"],
-    'M': ["#   #", "## ##", "# # #", "# # #", "#   #", "#   #", "#   #"],
-    'N': ["#   #", "##  #", "# # #", "#  ##", "#   #", "#   #", "#   #"],
-    'O': [" ### ", "#   #", "#   #", "#   #", "#   #", "#   #", " ### "],
-    'P': ["#### ", "#   #", "#   #", "#### ", "#    ", "#    ", "#    "],
-    'R': ["#### ", "#   #", "#   #", "#### ", "# #  ", "#  # ", "#   #"],
-    'S': [" ####", "#    ", "#    ", " ### ", "    #", "    #", "#### "],
-    'T': ["#####", "  #  ", "  #  ", "  #  ", "  #  ", "  #  ", "  #  "],
-    'U': ["#   #", "#   #", "#   #", "#   #", "#   #", "#   #", " ### "],
-    'W': ["#   #", "#   #", "#   #", "# # #", "# # #", "## ##", "#   #"],
-    'F': ["#####", "#    ", "#    ", "#### ", "#    ", "#    ", "#    "],
-    'J': ["  ###", "   # ", "   # ", "   # ", "   # ", "#  # ", " ##  "],
-    'K': ["#   #", "#  # ", "# #  ", "##   ", "# #  ", "#  # ", "#   #"],
-    'Q': [" ### ", "#   #", "#   #", "#   #", "# # #", "#  # ", " ## #"],
-    'V': ["#   #", "#   #", "#   #", "#   #", "#   #", " # # ", "  #  "],
-    'X': ["#   #", "#   #", " # # ", "  #  ", " # # ", "#   #", "#   #"],
-    'Y': ["#   #", "#   #", " # # ", "  #  ", "  #  ", "  #  ", "  #  "],
-    'Z': ["#####", "    #", "   # ", "  #  ", " #   ", "#    ", "#####"],
-    '1': ["  #  ", " ##  ", "  #  ", "  #  ", "  #  ", "  #  ", " ### "],
-    '2': [" ### ", "#   #", "    #", "   # ", "  #  ", " #   ", "#####"],
-    '3': [" ### ", "#   #", "    #", "  ## ", "    #", "#   #", " ### "],
-    '4': ["   # ", "  ## ", " # # ", "#  # ", "#####", "   # ", "   # "],
-    '5': ["#####", "#    ", "#### ", "    #", "    #", "#   #", " ### "],
-    '6': [" ### ", "#    ", "#    ", "#### ", "#   #", "#   #", " ### "],
-    '7': ["#####", "    #", "   # ", "  #  ", " #   ", " #   ", " #   "],
-    '9': [" ### ", "#   #", "#   #", " ####", "    #", "    #", " ### "],
-    '_': ["     ", "     ", "     ", "     ", "     ", "     ", "#####"],
-    '/': ["    #", "    #", "   # ", "  #  ", " #   ", "#    ", "#    "],
-    '0': [" ### ", "#   #", "#  ##", "# # #", "##  #", "#   #", " ### "],
-    '8': [" ### ", "#   #", "#   #", " ### ", "#   #", "#   #", " ### "],
-    '-': ["     ", "     ", "     ", "#####", "     ", "     ", "     "],
-    '+': ["     ", "  #  ", "  #  ", "#####", "  #  ", "  #  ", "     "],
-    '%': ["##   ", "##  #", "   # ", "  #  ", " #   ", "#  ##", "   ##"],
-    '.': ["     ", "     ", "     ", "     ", "     ", "     ", "  #  "],
-    'i': ["  #  ", "     ", " ##  ", "  #  ", "  #  ", "  #  ", " ### "],
-    't': ["  #  ", "  #  ", "#####", "  #  ", "  #  ", "  #  ", "   ##"],
-    ' ': ["     ", "     ", "     ", "     ", "     ", "     ", "     "],
-}
 GLYPH_W, GLYPH_H = 6, 7
 
 
@@ -95,6 +50,8 @@ def _glyph_blits(ch, scale, color):
                 blits.append((sy, x0, row))
     return blits
 
+# in-code fallback cursor; the editable authority is icons/cursor.pgm,
+# installed via Screen.set_cursor at launcher startup
 ARROW = [
     "#       ",
     "##      ",
@@ -109,38 +66,6 @@ ARROW = [
     "## #**# ",
     "#   ##  ",
 ]
-CUR_W, CUR_H = 8, 12
-
-GEAR_ICON = [
-    "     ###     ",
-    "     ###     ",
-    "   #######   ",
-    "  #########  ",
-    "  #########  ",
-    "#####   #####",
-    "#####   #####",
-    "#####   #####",
-    "  #########  ",
-    "  #########  ",
-    "   #######   ",
-    "     ###     ",
-    "     ###     ",
-]
-
-BACK_ICON = [
-    "     #       ",
-    "    ##       ",
-    "   ###       ",
-    "  ####       ",
-    " ############",
-    "#############",
-    "#############",
-    " ############",
-    "  ####       ",
-    "   ###       ",
-    "    ##       ",
-    "     #       ",
-]
 
 
 class Screen:
@@ -148,6 +73,14 @@ class Screen:
         self.w, self.h = fb_size()
         self.fb = open(FBDEV, 'r+b', buffering=0)
         self.scene = bytearray(self.w * self.h * 2)
+        self.set_cursor(ARROW)
+
+    def set_cursor(self, rows):
+        """Cursor sprite as ' '/'#'/'*' rows (the assets.parse_pbm PGM
+        format); None/empty keeps the current one."""
+        if rows:
+            self.cursor = rows
+            self.cur_w, self.cur_h = len(rows[0]), len(rows)
 
     def fill_rect(self, x, y, w, h, color):
         px = struct.pack('<H', color)
@@ -182,13 +115,14 @@ class Screen:
             self.fb.write(self.scene[off:off + w * 2])
 
     def draw_cursor(self, cx, cy):
-        """Composite arrow over scene into a temp patch, write only that."""
-        for gy, line in enumerate(ARROW):
+        """Composite the cursor over scene into a temp patch, write only
+        that."""
+        for gy, line in enumerate(self.cursor):
             ry = cy + gy
             if not (0 <= ry < self.h):
                 continue
             off = (ry * self.w + cx) * 2
-            n = min(CUR_W, self.w - cx)
+            n = min(self.cur_w, self.w - cx)
             patch = bytearray(self.scene[off:off + n * 2])
             for gx in range(n):
                 c = line[gx]
@@ -201,7 +135,7 @@ class Screen:
 
     def erase_cursor(self, cx, cy):
         self.flush(cx, min(cy, self.h - 1),
-                   min(CUR_W, self.w - cx), min(CUR_H, self.h - cy))
+                   min(self.cur_w, self.w - cx), min(self.cur_h, self.h - cy))
 
 
 def fullscreen_message(scr, msg):

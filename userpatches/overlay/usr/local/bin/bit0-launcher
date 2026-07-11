@@ -26,13 +26,14 @@ sys.path.insert(0, '/usr/local/lib')
 from bit0.evdev import (EV_SYN, EV_KEY, EV_REL, EV_ABS,
                         REL_X, REL_Y, ABS_X, ABS_Y, BTN_LEFT, BTN_TOUCH,
                         EVENT_SIZE, unpack_event, find_event)
-from bit0.fb import (Screen, fullscreen_message, GLYPH_H,
-                     GEAR_ICON, BACK_ICON, C_TITLE, C_BLACK, C_WHITE)
+from bit0.fb import Screen, fullscreen_message, GLYPH_H
 from bit0.apps import (kill_stale, launch_entry, run_terminal, run_calibrate,
                        get_volume, vol_set, vol_state_read,
                        get_brightness, set_brightness)
 from bit0.sdspi import run_sdcard, sd_release
 from bit0.registry import load_apps
+from bit0.ui import theme
+from bit0.ui.assets import load_icon, GEAR_FALLBACK, BACK_FALLBACK
 from bit0.ui.core import Page, Router
 from bit0.ui.widgets import Button, LiveLabel, Slider, AppGrid, vstack, hstack
 
@@ -65,20 +66,45 @@ def close_inputs(devs):
             pass
 
 
-def splash(scr):
-    scr.fill_rect(0, 0, scr.w, scr.h, C_BLACK)
-    s = 6
-    tw = scr.text_width('Bit-0', s)
-    scr.text('Bit-0', (scr.w - tw) // 2, (scr.h - GLYPH_H * s) // 2 - 14, s, C_WHITE)
-    bar_y = (scr.h + GLYPH_H * s) // 2
-    scr.fill_rect((scr.w - tw) // 2, bar_y, tw, 4, C_TITLE)
+def splash(scr, th):
+    """Boot splash, fully theme-driven (audit 6.3): text/colors/scale/
+    duration and an optional logo come from theme.json; duration_s 0
+    skips it entirely."""
+    if th.splash_duration_s <= 0:
+        return
+    scr.fill_rect(0, 0, scr.w, scr.h, th.splash_bg_color)
+    s = th.splash_font_scale
+    th_h = round(GLYPH_H * s)
+    logo = load_icon(th.splash_logo) if th.splash_logo else None
+    cy = (scr.h - th_h) // 2 - 14
+    if logo:
+        lw, lh = len(logo[0]), len(logo)
+        if not th.splash_text:  # logo only: center it
+            ly = (scr.h - lh) // 2
+        else:                   # logo above the text block
+            ly = max(0, cy - lh - 8)
+            cy = ly + lh + 8
+        lx = (scr.w - lw) // 2
+        for gy, line in enumerate(logo):
+            for gx, ch in enumerate(line):
+                if ch == '#':
+                    scr.fill_rect(lx + gx, ly + gy, 1, 1, th.splash_text_color)
+                elif ch == '*':
+                    scr.fill_rect(lx + gx, ly + gy, 1, 1, th.splash_bar_color)
+    if th.splash_text:
+        tw = scr.text_width(th.splash_text, s)
+        scr.text(th.splash_text, (scr.w - tw) // 2, cy, s,
+                 th.splash_text_color)
+        scr.fill_rect((scr.w - tw) // 2, cy + th_h + 14, tw, 4,
+                      th.splash_bar_color)
     scr.flush()
-    time.sleep(2.2)
+    time.sleep(th.splash_duration_s)
 
 
-def build_pages(scr, state):
+def build_pages(scr, state, th):
     """Main menu (registry-driven tile grid) + settings. Control widgets
-    read/write the State cache, never sysfs/subprocess in the draw path."""
+    read/write the State cache, never sysfs/subprocess in the draw path;
+    colors and metrics come from the theme."""
 
     def vol_step(d):
         base = state['vol'] if state['vol'] is not None else get_volume()
@@ -100,17 +126,22 @@ def build_pages(scr, state):
         {'order': 90, 'label': 'SD CARD', 'app': (lambda: run_sdcard(scr))},
     ] + load_apps()
     entries.sort(key=lambda e: (e['order'], e['label']))
-    grid = AppGrid(entries, x=6, y=40, w=scr.w - 12, h=scr.h - 50)
-    gear = Button(icon=GEAR_ICON, action={'push': 'settings'},
+    bottom = scr.h - th.mascot_strip  # 6.5 reserves this for the mascot
+    grid = AppGrid(entries, x=6, y=40, w=scr.w - 12, h=bottom - 50)
+    gear = Button(icon=load_icon('gear.pbm') or GEAR_FALLBACK,
+                  action={'push': 'settings'},
                   x=scr.w - 36, y=6, w=30, h=26)
     main = Page('main', 'BIT-0', [grid, gear])
 
+    slider_y, volrow_h = 46, 30
+    volrow_y = slider_y + th.slider_h + 18
     slider = Slider('BRIGHTNESS', getter=(lambda: state['bri']),
-                    setter=bri_set, x=24, y=46, w=scr.w - 48, h=24)
+                    setter=bri_set, x=24, y=slider_y, w=scr.w - 48,
+                    h=th.slider_h)
     volrow = hstack([Button('VOL -', action={'act': (lambda: vol_step(-10))}),
                      LiveLabel(vol_text),
                      Button('VOL +', action={'act': (lambda: vol_step(+10))})],
-                    x=24, y=88, w=scr.w - 48, h=30, gap=8)
+                    x=24, y=volrow_y, w=scr.w - 48, h=volrow_h, gap=8)
     col = vstack([
         Button('CALIBRATE',
                action={'launch': {'label': 'CALIBRATE', 'app': run_calibrate}}),
@@ -118,8 +149,11 @@ def build_pages(scr, state):
                                   'msg': 'RESTARTING...'}),
         Button('POWER OFF', action={'cmd': [['sync'], ['poweroff']],
                                     'msg': 'POWERING OFF'})],
-        x=(scr.w - 260) // 2, w=260, top=128, bottom=scr.h - 10)
-    back = Button(icon=BACK_ICON, action={'pop': True}, x=6, y=6, w=30, h=26)
+        x=(scr.w - th.button_w) // 2, w=th.button_w,
+        top=volrow_y + volrow_h + 10, bottom=bottom - 10,
+        max_h=th.button_max_h)
+    back = Button(icon=load_icon('back.pbm') or BACK_FALLBACK,
+                  action={'pop': True}, x=6, y=6, w=30, h=26)
     settings = Page('settings', 'SETTINGS', [slider] + volrow + col + [back])
 
     return {'main': main, 'settings': settings}
@@ -162,18 +196,20 @@ def main():
     except OSError:
         pass
 
+    th = theme.load()
     scr = Screen()
+    scr.set_cursor(load_icon('cursor.pgm'))  # None keeps the built-in arrow
     # splash only on the first start after boot (/tmp is tmpfs); respawns
     # and manual restarts go straight to the menu
     if not os.path.exists('/tmp/.bit0-splash-shown'):
-        splash(scr)
+        splash(scr, th)
         open('/tmp/.bit0-splash-shown', 'w').close()
 
     # Value cache: widgets draw from here, never from sysfs/subprocess.
     # vol is None until first read (on settings-page entry).
     state = {'vol': None, 'vol_mtime': None,
              'bri': get_brightness(), 'bri_pending': None}
-    router = Router(build_pages(scr, state), root='main')
+    router = Router(build_pages(scr, state, th), root='main')
 
     cx, cy = scr.w // 2, scr.h // 2
     devs = open_inputs()

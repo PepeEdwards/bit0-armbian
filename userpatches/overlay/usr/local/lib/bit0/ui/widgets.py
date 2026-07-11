@@ -1,10 +1,10 @@
 """Widgets for the Bit0 launcher (audit 6.1). Compose-only: no widget
 writes to the framebuffer; the launcher's render tick flushes."""
 
-from ..fb import (GLYPH_W, GLYPH_H, C_BG, C_TITLE, C_BTN, C_BTNHI,
-                  C_TEXT, C_TEXTHI, C_WHITE)
+from ..fb import GLYPH_W, GLYPH_H
 from .core import Widget
 from .assets import load_icon
+from .theme import current as theme
 
 
 def vstack(widgets, x, w, top, bottom, gap_max=16.0, max_h=48):
@@ -50,9 +50,10 @@ class Button(Widget):
         self.action = action
 
     def draw(self, scr, hover):
-        face = C_BTNHI if hover else C_BTN
-        fg = C_TEXTHI if hover else C_TEXT
-        scr.fill_rect(self.x, self.y, self.w, self.h, C_WHITE)
+        th = theme()
+        face = th.btn_hi if hover else th.btn
+        fg = th.text_hi if hover else th.text
+        scr.fill_rect(self.x, self.y, self.w, self.h, th.border)
         scr.fill_rect(self.x + 2, self.y + 2, self.w - 4, self.h - 4, face)
         if self.icon:
             iw, ih = icon_size(self.icon)
@@ -78,12 +79,13 @@ class LiveLabel(Widget):
         self.fn = fn
 
     def draw(self, scr, hover):
-        scr.fill_rect(self.x, self.y, self.w, self.h, C_BG)
+        th = theme()
+        scr.fill_rect(self.x, self.y, self.w, self.h, th.bg)
         s = 2
         txt = self.fn()
         tw = scr.text_width(txt, s)
         scr.text(txt, self.x + (self.w - tw) // 2,
-                 self.y + (self.h - GLYPH_H * s) // 2, s, C_TEXT)
+                 self.y + (self.h - GLYPH_H * s) // 2, s, th.text)
 
 
 class Slider(Widget):
@@ -117,24 +119,25 @@ class Slider(Widget):
         return True
 
     def draw(self, scr, hover):
+        th = theme()
         pct = self.getter()
         bx, by, bw, bh = self.x, self.y, self.w, self.h
         # clear the FULL flush rect: the old knob position must not
         # survive a partial redraw as a border trace
-        scr.fill_rect(*self.flush_rect(), C_BG)
-        scr.fill_rect(bx, by, bw, bh, C_WHITE)                # border
-        scr.fill_rect(bx + 1, by + 1, bw - 2, bh - 2, C_BTN)  # groove
+        scr.fill_rect(*self.flush_rect(), th.bg)
+        scr.fill_rect(bx, by, bw, bh, th.border)                # border
+        scr.fill_rect(bx + 1, by + 1, bw - 2, bh - 2, th.btn)  # groove
         fillw = int((bw - 2) * pct / 100)
         if fillw > 0:
             scr.fill_rect(bx + 1, by + 1, fillw, bh - 2,
-                          C_BTNHI if hover else C_TITLE)
+                          th.btn_hi if hover else th.title)
         kx = bx + min(fillw, bw - 4)
-        scr.fill_rect(kx, by - 3, 4, bh + 6, C_WHITE)         # knob
+        scr.fill_rect(kx, by - 3, 4, bh + 6, th.border)         # knob
         # label inside the bar (above it, it collided with the back button)
-        scr.text(self.name, bx + 8, by + (bh - GLYPH_H * 2) // 2, 2, C_WHITE)
+        scr.text(self.name, bx + 8, by + (bh - GLYPH_H * 2) // 2, 2, th.text)
         txt = str(pct)
         scr.text(txt, bx + bw - scr.text_width(txt, 2) - 6,
-                 by + (bh - GLYPH_H * 2) // 2, 2, C_TEXT)
+                 by + (bh - GLYPH_H * 2) // 2, 2, th.text)
 
 
 class Tile(Widget):
@@ -148,10 +151,11 @@ class Tile(Widget):
 
     def _label_layout(self):
         """(scale, lines): the largest font scale whose word-wrap fits the
-        tile - never splits a word mid-line just to grow the text. 1.5 is
-        the ceiling: full 2x read oversized on the 2.4" panel."""
+        tile - never splits a word mid-line just to grow the text. The
+        theme sets the ceiling (default 1.5: full 2x read oversized on
+        the 2.4" panel)."""
         label = self.entry['label']
-        for s in (1.5, 1):
+        for s in dict.fromkeys((theme().tile_label_scale_max, 1)):
             maxc = max(1, (self.w - 6) // round(GLYPH_W * s))
             if any(len(word) > maxc for word in label.split()):
                 continue
@@ -171,9 +175,10 @@ class Tile(Widget):
         return 1, [label[i:i + maxc] for i in range(0, len(label), maxc)][:4]
 
     def draw(self, scr, hover):
-        face = C_BTNHI if hover else C_BTN
-        fg = C_TEXTHI if hover else C_TEXT
-        scr.fill_rect(self.x, self.y, self.w, self.h, C_WHITE)
+        th = theme()
+        face = th.btn_hi if hover else th.btn
+        fg = th.text_hi if hover else th.text
+        scr.fill_rect(self.x, self.y, self.w, self.h, th.border)
         scr.fill_rect(self.x + 2, self.y + 2, self.w - 4, self.h - 4, face)
         if self.icon:
             iw, ih = icon_size(self.icon)
@@ -197,21 +202,23 @@ _TRI_R = ['#' * (7 - abs(6 - r)) + ' ' * abs(6 - r) for r in range(13)]
 
 
 class AppGrid(Widget):
-    """Paged horizontal tile row for the main menu: at most PER_PAGE
-    square tiles, vertically centered, with arrow zones at the row ends
-    that appear only when a previous/next page exists (audit 6.1).
-    3 per page at 80 px: 4 at 56 px read too small/cramped on the 2.4"
-    panel, and 80 px fits scale-1.5 labels up to 8 chars per line."""
+    """Paged horizontal tile row for the main menu: square tiles,
+    vertically centered, with arrow zones at the row ends that appear
+    only when a previous/next page exists (audit 6.1). Tile size, gap,
+    and tiles-per-page come from the theme (defaults: 3 x 80 px - 4 x
+    56 px read too small/cramped on the 2.4" panel)."""
 
-    PER_PAGE = 3
     ARROW_W = 20
     ARROW_PAD = 4
 
-    def __init__(self, entries, tile=80, gap=14, **rect):
+    def __init__(self, entries, tile=None, gap=None, per_page=None, **rect):
         super().__init__(**rect)
+        th = theme()
         self.entries = entries
-        self.tile = tile
-        self.gap = gap
+        self.tile = tile if tile is not None else th.tile_size
+        self.gap = gap if gap is not None else th.tile_gap
+        self.per_page = max(1, per_page if per_page is not None
+                            else th.tiles_per_page)
         self.pageno = 0
         self._hover = None  # 'l' / 'r' / tile index / None
         self._tiles = []
@@ -219,8 +226,8 @@ class AppGrid(Widget):
         self._rebuild()
 
     def _rebuild(self):
-        start = self.pageno * self.PER_PAGE
-        vis = self.entries[start:start + self.PER_PAGE]
+        start = self.pageno * self.per_page
+        vis = self.entries[start:start + self.per_page]
         ts, gap = self.tile, self.gap
         row_w = len(vis) * ts + (len(vis) - 1) * gap
         x0 = self.x + (self.w - row_w) // 2
@@ -233,7 +240,7 @@ class AppGrid(Widget):
         aw = self.ARROW_W
         self._arrow_l = (self.x, ty, aw, ts) if self.pageno > 0 else None
         self._arrow_r = (self.x + self.w - aw, ty, aw, ts) \
-            if start + self.PER_PAGE < len(self.entries) else None
+            if start + self.per_page < len(self.entries) else None
 
     def _target_at(self, px, py):
         for which, rect in (('l', self._arrow_l), ('r', self._arrow_r)):
@@ -255,7 +262,7 @@ class AppGrid(Widget):
     def flip(self, step):
         """Page the grid by +-1 if a page exists in that direction."""
         new = self.pageno + step
-        if 0 <= new * self.PER_PAGE < len(self.entries):
+        if 0 <= new * self.per_page < len(self.entries):
             self.pageno = new
             self._hover = None
             self._rebuild()
@@ -276,7 +283,8 @@ class AppGrid(Widget):
         return None
 
     def draw(self, scr, hover):
-        scr.fill_rect(self.x, self.y, self.w, self.h, C_BG)
+        th = theme()
+        scr.fill_rect(self.x, self.y, self.w, self.h, th.bg)
         for i, t in enumerate(self._tiles):
             t.draw(scr, self._hover == i)
         for which, rect, name, fb in (('l', self._arrow_l, 'left.pbm', _TRI_L),
@@ -285,6 +293,6 @@ class AppGrid(Widget):
                 continue
             rows = load_icon(name) or fb
             iw, ih = icon_size(rows)
-            color = C_BTNHI if self._hover == which else C_TEXT
+            color = th.btn_hi if self._hover == which else th.text
             draw_icon(scr, rows, rect[0] + (rect[2] - iw) // 2,
                       rect[1] + (rect[3] - ih) // 2, color)

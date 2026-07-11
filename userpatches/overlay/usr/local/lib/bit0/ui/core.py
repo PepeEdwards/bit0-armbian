@@ -11,7 +11,7 @@ nested scrolling, a recursive tree would only add recursive hit-testing
 and dirty bookkeeping for nothing.
 """
 
-from ..fb import C_BG, C_TITLE
+from .theme import current as theme
 
 
 class Widget:
@@ -88,10 +88,11 @@ class Page:
     def compose(self, scr):
         """Compose the full page (background, title, widgets) into the
         scene buffer; the caller flushes."""
-        scr.fill_rect(0, 0, scr.w, scr.h, C_BG)
+        th = theme()
+        scr.fill_rect(0, 0, scr.w, scr.h, th.bg)
         s = 2
         tw = scr.text_width(self.title, s)
-        scr.text(self.title, (scr.w - tw) // 2, 12, s, C_TITLE)
+        scr.text(self.title, (scr.w - tw) // 2, 12, s, th.title)
         for i, w in enumerate(self.widgets):
             w.draw(scr, i == self.hover)
             w.dirty = False
