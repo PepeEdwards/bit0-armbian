@@ -163,10 +163,10 @@ def slider_pct(b, x):
 
 
 def widget_rect(b):
-    """Scene rectangle a widget composes into (sliders overdraw their
-    label above and knob margins)."""
+    """Scene rectangle a widget composes into (the slider knob overhangs
+    the track by 3 px top/bottom)."""
     if b.get('slider'):
-        return (b['x'], b['y'] - 18, b['w'] + 4, b['h'] + 24)
+        return (b['x'], b['y'] - 4, b['w'] + 4, b['h'] + 8)
     return (b['x'], b['y'], b['w'], b['h'])
 
 
@@ -176,11 +176,10 @@ def draw_slider(scr, b, hover):
     scene only - the render tick flushes."""
     pct = b['get']()
     bx, by, bw, bh = b['x'], b['y'], b['w'], b['h']
-    # clear the FULL widget rect, not just the label strip: the knob
-    # overhangs the track by 3 px top/bottom and its previous position
-    # would otherwise survive a partial redraw as a border trace
+    # clear the FULL widget rect: the knob overhangs the track by 3 px
+    # top/bottom and its previous position would otherwise survive a
+    # partial redraw as a border trace
     scr.fill_rect(*widget_rect(b), C_BG)
-    scr.text(b['name'], bx, by - 18, 2, C_TITLE)
     scr.fill_rect(bx, by, bw, bh, C_WHITE)                # border
     scr.fill_rect(bx + 1, by + 1, bw - 2, bh - 2, C_BTN)  # groove
     fillw = int((bw - 2) * pct / 100)
@@ -189,6 +188,8 @@ def draw_slider(scr, b, hover):
                       C_BTNHI if hover else C_TITLE)
     kx = bx + min(fillw, bw - 4)
     scr.fill_rect(kx, by - 3, 4, bh + 6, C_WHITE)         # knob
+    # label inside the bar (a label above it collided with the back button)
+    scr.text(b['name'], bx + 8, by + (bh - GLYPH_H * 2) // 2, 2, C_WHITE)
     txt = str(pct)
     scr.text(txt, bx + bw - scr.text_width(txt, 2) - 6,
              by + (bh - GLYPH_H * 2) // 2, 2, C_TEXT)
