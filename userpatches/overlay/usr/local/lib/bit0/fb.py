@@ -50,30 +50,15 @@ def _glyph_blits(ch, scale, color):
                 blits.append((sy, x0, row))
     return blits
 
-# in-code fallback cursor; the editable authority is icons/cursor.pgm,
-# installed via Screen.set_cursor at launcher startup
-ARROW = [
-    "#       ",
-    "##      ",
-    "#*#     ",
-    "#**#    ",
-    "#***#   ",
-    "#****#  ",
-    "#*****# ",
-    "#******#",
-    "#***####",
-    "#*#**#  ",
-    "## #**# ",
-    "#   ##  ",
-]
-
-
 class Screen:
     def __init__(self):
         self.w, self.h = fb_size()
         self.fb = open(FBDEV, 'r+b', buffering=0)
         self.scene = bytearray(self.w * self.h * 2)
-        self.set_cursor(ARROW)
+        # cursor comes from icons/cursor.pgm via set_cursor at startup;
+        # until then (or if the asset is missing) there is simply none
+        self.cursor = None
+        self.cur_w = self.cur_h = 0
 
     def set_cursor(self, rows):
         """Cursor sprite as ' '/'#'/'*' rows (the assets.parse_pbm PGM
@@ -128,7 +113,9 @@ class Screen:
 
     def draw_cursor(self, cx, cy):
         """Composite the cursor over scene into a temp patch, write only
-        that."""
+        that. No-op until a cursor sprite is set (icons/cursor.pgm)."""
+        if not self.cursor:
+            return
         for gy, line in enumerate(self.cursor):
             ry = cy + gy
             if not (0 <= ry < self.h):
@@ -146,6 +133,8 @@ class Screen:
             self.fb.write(patch)
 
     def erase_cursor(self, cx, cy):
+        if not self.cursor:
+            return
         self.flush(cx, min(cy, self.h - 1),
                    min(self.cur_w, self.w - cx), min(self.cur_h, self.h - cy))
 

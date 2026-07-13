@@ -20,7 +20,15 @@
   },
   "mascot": {
     "enabled": true,
-    "greeting": ["HELLO AGAIN.", "PICK AN APP TO START."],
+    "onboarding": [
+      "HI {USER}. I AM {MASCOT}.",
+      "WELCOME TO YOUR BIT-0.",
+      "USE THE ARROWS OR THE TOUCH SCREEN TO MOVE AROUND.",
+      "PRESS ENTER OR TAP A TILE TO LAUNCH AN APP.",
+      "THE GEAR ON THE TOP RIGHT OPENS THE SETTINGS.",
+      "PRESS SPACE OR CLICK TO CONTINUE. ESC SKIPS ME."
+    ],
+    "greeting": ["HELLO AGAIN {USER}.", "PICK AN APP TO START."],
     "idle": ["IM HERE.", "IM WAITING...", "LET ME KNOW."]
   },
   "features": {

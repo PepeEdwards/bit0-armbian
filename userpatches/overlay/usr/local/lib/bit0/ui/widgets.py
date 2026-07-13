@@ -4,7 +4,7 @@ writes to the framebuffer; the launcher's render tick flushes."""
 from ..evdev import KEY_LEFT, KEY_RIGHT
 from ..fb import GLYPH_W, GLYPH_H
 from .core import Widget
-from .assets import load_icon
+from .assets import load_icon, load_color_icon
 from .theme import current as theme
 
 
@@ -152,14 +152,43 @@ class Slider(Widget):
                  by + (bh - GLYPH_H * 2) // 2, 2, th.text)
 
 
-class Tile(Widget):
-    """Square app tile: centered PBM icon, or the label as wrapped text
-    when the entry has no icon - entries work either way (audit 6.1)."""
+def _tile_icon(name):
+    """Resolve an entry's icon field to Tile kwargs. A .565/.png names a
+    color icon; anything else a mono .pbm. Missing/broken -> no icon
+    (the tile falls back to the boxed text label)."""
+    if not name:
+        return {}
+    if name.endswith(('.565', '.png')):
+        return {'color': load_color_icon(name)}
+    return {'icon': load_icon(name)}
 
-    def __init__(self, entry, icon=None, **rect):
+
+def _wrap_label(label, maxc):
+    lines, cur = [], ''
+    for word in label.split():
+        cand = (cur + ' ' + word).strip()
+        if len(cand) <= maxc:
+            cur = cand
+        else:
+            if cur:
+                lines.append(cur)
+            cur = word[:maxc]
+    if cur:
+        lines.append(cur)
+    return lines or ['']
+
+
+class Tile(Widget):
+    """Square app tile. With an icon (color .565 or mono .pbm): no box -
+    the icon sits on top and the label goes under it in the small
+    (scale-1) font. Without an icon: a bordered box with the label as
+    big wrapped text. Entries work either way (audit 6.1/6.3)."""
+
+    def __init__(self, entry, icon=None, color=None, **rect):
         super().__init__(**rect)
         self.entry = entry
-        self.icon = icon
+        self.icon = icon      # mono row strings, or None
+        self.color = color    # ColorIcon, or None
 
     def _label_layout(self):
         """(scale, lines): the largest font scale whose word-wrap fits the
@@ -188,29 +217,49 @@ class Tile(Widget):
 
     def draw(self, scr, focused):
         th = theme()
+        if self.color or self.icon:
+            self._draw_icon_tile(scr, th, focused)
+            return
+        # icon-less: bordered box with the big wrapped label
         face = th.btn_hi if focused else th.btn
         fg = th.text_hi if focused else th.text
         scr.fill_rect(self.x, self.y, self.w, self.h, th.border)
         scr.fill_rect(self.x + 2, self.y + 2, self.w - 4, self.h - 4, face)
-        if self.icon:
-            iw, ih = icon_size(self.icon)
-            draw_icon(scr, self.icon, self.x + (self.w - iw) // 2,
-                      self.y + (self.h - ih) // 2, fg)
+        s, lines = self._label_layout()
+        lh = round(GLYPH_H * s) + 2
+        ty = self.y + (self.h - len(lines) * lh) // 2
+        for i, ln in enumerate(lines):
+            tw = scr.text_width(ln, s)
+            scr.text(ln, self.x + (self.w - tw) // 2, ty + i * lh, s, fg)
+
+    def _draw_icon_tile(self, scr, th, focused):
+        # focus shows a box outline over the plain bg (no fill colour), so
+        # the icon's own colours are never tinted by a highlight
+        scr.fill_rect(self.x, self.y, self.w, self.h, th.bg)
+        if focused:
+            scr.fill_rect(self.x, self.y, self.w, self.h, th.btn_hi)
+            scr.fill_rect(self.x + 2, self.y + 2, self.w - 4, self.h - 4,
+                          th.bg)
+        fg = th.text
+        iw, ih = (self.color.w, self.color.h) if self.color \
+            else icon_size(self.icon)
+        # small (scale-1) label under the icon, wrapped to the tile
+        lines = _wrap_label(self.entry['label'], max(1, (self.w - 4) // GLYPH_W))
+        lh = GLYPH_H + 1
+        label_h = len(lines) * lh
+        top = self.y + max(2, (self.h - ih - 3 - label_h) // 2)
+        ix = self.x + (self.w - iw) // 2
+        if self.color:
+            self.color.draw(scr, ix, top)
         else:
-            s, lines = self._label_layout()
-            lh = round(GLYPH_H * s) + 2
-            ty = self.y + (self.h - len(lines) * lh) // 2
-            for i, ln in enumerate(lines):
-                tw = scr.text_width(ln, s)
-                scr.text(ln, self.x + (self.w - tw) // 2, ty + i * lh, s, fg)
+            draw_icon(scr, self.icon, ix, top, fg)
+        ty = top + ih + 3
+        for i, ln in enumerate(lines):
+            tw = scr.text_width(ln, 1)
+            scr.text(ln, self.x + (self.w - tw) // 2, ty + i * lh, 1, fg)
 
     def on_click(self, px, py):
         return {'launch': self.entry}
-
-
-# code fallbacks if the arrow PBMs are missing: solid < / > triangles
-_TRI_L = [' ' * abs(6 - r) + '#' * (7 - abs(6 - r)) for r in range(13)]
-_TRI_R = ['#' * (7 - abs(6 - r)) + ' ' * abs(6 - r) for r in range(13)]
 
 
 class AppGrid(Widget):
@@ -244,11 +293,9 @@ class AppGrid(Widget):
         row_w = len(vis) * ts + (len(vis) - 1) * gap
         x0 = self.x + (self.w - row_w) // 2
         ty = self.y + (self.h - ts) // 2
-        self._tiles = [
-            Tile(e, icon=load_icon(e['icon']) if e.get('icon') else None,
-                 x=x0 + i * (ts + gap), y=ty, w=ts, h=ts)
-            for i, e in enumerate(vis)
-        ]
+        self._tiles = [Tile(e, x=x0 + i * (ts + gap), y=ty, w=ts, h=ts,
+                            **_tile_icon(e.get('icon')))
+                       for i, e in enumerate(vis)]
         aw = self.ARROW_W
         self._arrow_l = (self.x, ty, aw, ts) if self.pageno > 0 else None
         self._arrow_r = (self.x + self.w - aw, ty, aw, ts) \
@@ -331,11 +378,11 @@ class AppGrid(Widget):
         scr.fill_rect(self.x, self.y, self.w, self.h, th.bg)
         for i, t in enumerate(self._tiles):
             t.draw(scr, self._focus == i)
-        for which, rect, name, fb in (('l', self._arrow_l, 'left.pbm', _TRI_L),
-                                      ('r', self._arrow_r, 'right.pbm', _TRI_R)):
-            if not rect:
+        for which, rect, name in (('l', self._arrow_l, 'left.pbm'),
+                                  ('r', self._arrow_r, 'right.pbm')):
+            rows = load_icon(name) if rect else None
+            if not rows:
                 continue
-            rows = load_icon(name) or fb
             iw, ih = icon_size(rows)
             color = th.btn_hi if self._focus == which else th.text
             draw_icon(scr, rows, rect[0] + (rect[2] - iw) // 2,

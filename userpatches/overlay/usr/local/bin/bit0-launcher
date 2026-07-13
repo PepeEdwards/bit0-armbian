@@ -36,10 +36,10 @@ from bit0.apps import (kill_stale, launch_entry, run_terminal, run_calibrate,
 from bit0.sdspi import run_sdcard, sd_release
 from bit0.registry import load_apps
 from bit0.ui import theme
-from bit0.ui.assets import load_icon, GEAR_FALLBACK, BACK_FALLBACK
+from bit0.ui.assets import load_icon
 from bit0.ui.core import Page, Router
-from bit0.ui.mascot import (Mascot, MascotCard, load_mascots,
-                            read_selected, save_selected)
+from bit0.state import load as load_state, save as save_state
+from bit0.ui.mascot import Mascot, MascotCard, load_mascots, personalize
 from bit0.ui.widgets import Button, LiveLabel, Slider, AppGrid, vstack, hstack
 
 MOUSE_NAME = 'Lyra UART Mouse'
@@ -162,8 +162,7 @@ def build_pages(scr, state, th):
     # floats above page content and repaints via full recompose
     grid = AppGrid(entries, x=6, y=40, w=scr.w - 12,
                    h=scr.h - th.mascot_strip - 50)
-    gear = Button(icon=load_icon('gear.pbm') or GEAR_FALLBACK,
-                  action={'push': 'settings'},
+    gear = Button(icon=load_icon('gear.pbm'), action={'push': 'settings'},
                   x=scr.w - 36, y=6, w=30, h=26)
     main = Page('main', 'BIT-0', [grid, gear])
 
@@ -198,8 +197,8 @@ def build_pages(scr, state, th):
         x=(scr.w - th.button_w) // 2, w=th.button_w,
         top=volrow_y + volrow_h + 10, bottom=scr.h - 10,
         max_h=th.button_max_h)
-    back = Button(icon=load_icon('back.pbm') or BACK_FALLBACK,
-                  action={'pop': True}, x=6, y=6, w=30, h=26)
+    back = Button(icon=load_icon('back.pbm'), action={'pop': True},
+                  x=6, y=6, w=30, h=26)
     settings = Page('settings', 'SETTINGS', [slider] + volrow + col + [back])
 
     return {'main': main, 'settings': settings}
@@ -279,17 +278,19 @@ def main():
     state = {'vol': None, 'vol_mtime': None,
              'bri': get_brightness(), 'bri_pending': None}
     pages = build_pages(scr, state, th)
+    # device state (audit 6.5.2): user name, chosen mascot, onboarded flag
+    dev = load_state()
     mascot = None
-    if th.mascot_enabled:
-        pool = load_mascots()
-        sel = next((m for m in pool if m['id'] == read_selected()), None)
+    pool = load_mascots() if th.mascot_enabled else []
+    if pool:  # no mascot dirs -> feature off (no in-code art fallback)
+        sel = next((m for m in pool if m['id'] == dev['mascot']), None)
         box = th.mascot_strip - 6
         mascot = Mascot(sel or pool[0],
                         x=scr.w - box - 4, y=scr.h - box - 4, w=box, h=box)
         pages['main'].widgets.append(mascot)  # last in the reserved band
-        if sel is None:
-            # first boot (or wiped state): pick a companion; the card's
-            # action persists the choice and pops back to main
+        if not dev['onboarded']:
+            # first boot: pick a companion; the card's action persists
+            # the choice and starts the modal onboarding script
             cw, chh, gap = 110, 150, 24
             x0 = (scr.w - 2 * cw - gap) // 2
             cards = [MascotCard(m, x=x0 + i * (cw + gap), y=48,
@@ -299,7 +300,9 @@ def main():
     if mascot and 'choose' in pages:
         router.push('choose')
     elif mascot and first_boot and th.mascot_greeting:
-        mascot.say(list(th.mascot_greeting))
+        # regular boot: casual, personalized greeting (once per boot)
+        mascot.say(personalize(th.mascot_greeting,
+                               dev['user_name'], mascot.name))
 
     cx, cy = scr.w // 2, scr.h // 2
     devs = open_inputs()
@@ -480,7 +483,7 @@ def main():
                     continue  # no activation on autorepeat
                 if router.intercept_key(code):
                     # only modal messages capture keys; the cover state
-                    # changed either way, so repaint the whole scene
+                # changed either way, so repaint the whole scene
                     full = True
                     continue
                 a = page_key(pg, code)
@@ -542,13 +545,17 @@ def main():
                 pg.mark_values()
             elif 'mascot' in act:
                 d = act['mascot']
-                save_selected(d['id'])
+                dev['mascot'] = d['id']
+                dev['onboarded'] = True
+                save_state(dev)
                 mascot.set_definition(d)
                 pg = router.pop()
                 full = True
-                # onboarding: modal - locks the UI under the dim cover
-                mascot.say(['HI. I AM %s.' % d['name']]
-                           + list(th.mascot_greeting), modal=True)
+                # onboarding script: modal - locks the UI under the dim
+                # cover until walked through (audit 6.5.2)
+                mascot.say(personalize(th.mascot_onboarding,
+                                       dev['user_name'], d['name']),
+                           modal=True)
             elif 'launch' in act:
                 entry = act['launch']
                 print(f'bit0-launcher: launching {entry["label"]}', flush=True)

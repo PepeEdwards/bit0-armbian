@@ -93,3 +93,6 @@ status lines alongside it.
   `docs/PORTING-NOTES.md`.
 - Changes to daemons, units, or the launcher need an on-device smoke test noted
   in the commit/PR description (keyboard, touch, audio, and the affected flow).
+
+
+never commit a change unless is specified in the prompt.

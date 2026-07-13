@@ -14,10 +14,12 @@ longer means editing the drawing module.
 """
 
 import os
+import struct
 
 ICONS_DIR = os.environ.get('BIT0_ICONS_DIR', '/usr/local/share/bit0/icons')
 
 _cache = {}
+_color_cache = {}
 
 
 def parse_pbm(text):
@@ -60,38 +62,63 @@ def load_icon(name):
     return _cache[name]
 
 
-# In-code fallbacks so navigation survives missing/broken icon files
-# (the .pbm in the icons dir is the editable authority).
-GEAR_FALLBACK = [
-    "     ###     ",
-    "     ###     ",
-    "   #######   ",
-    "  #########  ",
-    "  #########  ",
-    "#####   #####",
-    "#####   #####",
-    "#####   #####",
-    "  #########  ",
-    "  #########  ",
-    "   #######   ",
-    "     ###     ",
-    "     ###     ",
-]
+class ColorIcon:
+    """A full-color RGB565 icon (the `.565` blob built from a PNG by
+    scripts/png-to-565.py, audit 6.3). Pre-sliced into opaque row spans
+    so drawing is slice-assignment into the scene, no per-pixel Python
+    in the draw path (same trick as the glyph cache)."""
 
-BACK_FALLBACK = [
-    "     #       ",
-    "    ##       ",
-    "   ###       ",
-    "  ####       ",
-    " ############",
-    "#############",
-    "#############",
-    " ############",
-    "  ####       ",
-    "   ###       ",
-    "    ##       ",
-    "     #       ",
-]
+    def __init__(self, w, h, spans):
+        self.w, self.h, self.spans = w, h, spans
+
+    def draw(self, scr, ox, oy):
+        sw = scr.w
+        for dy, dx, row in self.spans:
+            off = ((oy + dy) * sw + ox + dx) * 2
+            scr.scene[off:off + len(row)] = row
+
+
+def _parse_565(data):
+    if data[:4] != b'B565':
+        raise ValueError('bad magic')
+    w, h = struct.unpack('<HH', data[4:8])
+    px = data[8:8 + w * h * 2]
+    mask = data[8 + w * h * 2:]
+    if w <= 0 or h <= 0 or len(px) < w * h * 2 or len(mask) < (w * h + 7) // 8:
+        raise ValueError('truncated .565')
+    spans = []
+    for y in range(h):
+        x = 0
+        while x < w:
+            i = y * w + x
+            if not (mask[i >> 3] >> (7 - (i & 7)) & 1):
+                x += 1
+                continue
+            start = x
+            while x < w:
+                i = y * w + x
+                if not (mask[i >> 3] >> (7 - (i & 7)) & 1):
+                    break
+                x += 1
+            spans.append((y, start, px[(y * w + start) * 2:(y * w + x) * 2]))
+    return ColorIcon(w, h, spans)
+
+
+def load_color_icon(name):
+    """ColorIcon for a `.565` filename (cached); None if missing/invalid.
+    A `.png` name resolves to its built `.565` sibling - PNG is the
+    editable source, the blob is what ships (see png-to-565.py)."""
+    if name.endswith('.png'):
+        name = name[:-4] + '.565'
+    if name not in _color_cache:
+        icon = None
+        try:
+            with open(os.path.join(ICONS_DIR, name), 'rb') as f:
+                icon = _parse_565(f.read())
+        except (OSError, ValueError) as exc:
+            print(f'bit0 ui: color icon {name}: {exc}', flush=True)
+        _color_cache[name] = icon
+    return _color_cache[name]
 
 
 # ── 5x7 font as ASCII art (6th column = spacing) ────────────────────────────

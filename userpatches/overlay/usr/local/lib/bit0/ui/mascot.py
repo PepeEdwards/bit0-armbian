@@ -11,8 +11,8 @@ holding `mascot.toml` (name = "...") and one PBM/PGM sprite per emotion
 (`idle.pbm` required; add `happy.pbm`, `talk.pbm`, `blink.pbm`, ... as
 they get drawn - say(..., emotion=...) picks them up, and talk/blink
 animate automatically when those sprites exist). Adding a mascot =
-adding a directory; no code edit. The selection made on first boot
-persists in /var/lib/bit0/mascot.
+adding a directory; no code edit. The first-boot selection persists
+in the device state JSON (bit0.state).
 """
 
 import os
@@ -26,7 +26,6 @@ from .theme import current as theme
 
 MASCOTS_DIR = os.environ.get('BIT0_MASCOTS_DIR',
                              '/usr/local/share/bit0/mascots')
-SELECTED_FILE = '/var/lib/bit0/mascot'
 
 
 def _norm(rows):
@@ -35,66 +34,10 @@ def _norm(rows):
     return [r.ljust(w) for r in rows]
 
 
-# ── in-code fallback pool (the mascot dirs are the editable authority) ──────
-_ART_BIT = _norm([
-    "   #####                #####",
-    "  #     #              #     #",
-    " #       #            #       #",
-    " #  ###   #          #   ###  #",
-    " #  ###    ##########    ###  #",
-    "  #       #          #       #",
-    "   #     #            #     #",
-    "    #   #              #   #",
-    "     ###                ###",
-    "     #                    #",
-    "    #    ###      ###      #",
-    "    #    ###      ###      #",
-    "    #    ###      ###      #",
-    "   #                        #",
-    "   #          ##            #",
-    "   #         #  #           #",
-    "  #           ##             #",
-    "  #                          #",
-    "  #                          #",
-    "  #    #              #      #",
-    "   #    ##          ##      #",
-    "   #      ##########        #",
-    "    #                      #",
-    "     #                    #",
-    "      ####################",
-])
-_ART_PIXEL = _norm([
-    "   #                      #",
-    "   ##                    ##",
-    "   # #                  # #",
-    "   #  #                #  #",
-    "   #   ################   #",
-    "   #                      #",
-    "  #                        #",
-    "  #                        #",
-    "  #    ###          ###    #",
-    "  #    ###          ###    #",
-    " #     ###          ###     #",
-    " #                          #",
-    " #          #  #            #",
-    " #           ##             #",
-    "  #     #          #        #",
-    "  #      ####  ####        #",
-    "  #          ##            #",
-    "   #                      #",
-    "    #                    #",
-    "     ####################",
-])
-BUILTIN_MASCOTS = [
-    {'id': 'bit', 'name': 'BIT', 'sprites': {'idle': _ART_BIT}},
-    {'id': 'pixel', 'name': 'PIXEL', 'sprites': {'idle': _ART_PIXEL}},
-]
-
-
 def load_mascots():
-    """Mascot pool sorted by directory name; a broken mascot dir logs and
-    is skipped. Falls back to the built-in pool when the share dir is
-    missing/empty - the chooser must always have something to offer."""
+    """Mascot pool sorted by directory name (the mascots dir is the only
+    source - no in-code art). A broken mascot dir logs and is skipped;
+    an empty pool disables the mascot entirely (the launcher guards)."""
     out = []
     try:
         names = sorted(os.listdir(MASCOTS_DIR))
@@ -121,25 +64,7 @@ def load_mascots():
         except (OSError, KeyError, ValueError, TypeError,
                 tomllib.TOMLDecodeError) as exc:
             print(f'bit0 mascot: skipping {d}: {exc}', flush=True)
-    return out or [dict(m) for m in BUILTIN_MASCOTS]
-
-
-def read_selected():
-    """Persisted mascot id from the first-boot choice, or None."""
-    try:
-        with open(SELECTED_FILE) as f:
-            return f.read().strip() or None
-    except OSError:
-        return None
-
-
-def save_selected(mascot_id):
-    try:
-        os.makedirs(os.path.dirname(SELECTED_FILE), exist_ok=True)
-        with open(SELECTED_FILE, 'w') as f:
-            f.write(mascot_id + '\n')
-    except OSError as exc:
-        print(f'bit0 mascot: cannot persist choice: {exc}', flush=True)
+    return out
 
 
 # pixel insets per row for the bubble's rounded corners (radius 6)
@@ -152,6 +77,22 @@ def _rounded_rect(scr, x, y, w, h, color):
         d = min(i, h - 1 - i)
         inset = _CORNER[d] if d < len(_CORNER) else 0
         scr.fill_rect(x + inset, y + i, w - 2 * inset, 1, color)
+
+
+def personalize(msgs, user_name, mascot_name):
+    """Substitute {USER} and {MASCOT} in message lists (theme.json
+    onboarding/greeting). An empty user name drops the token together
+    with its leading space so 'HI {USER}.' degrades to 'HI.'."""
+    user = user_name.strip().upper()  # the 5x7 font is uppercase-only
+    out = []
+    for m in msgs:
+        m = m.replace('{MASCOT}', mascot_name)
+        if user:
+            m = m.replace('{USER}', user)
+        else:
+            m = m.replace(' {USER}', '').replace('{USER}', '')
+        out.append(' '.join(m.split()))
+    return out
 
 
 def _wrap(msg, maxc):

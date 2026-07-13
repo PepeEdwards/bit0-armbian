@@ -36,6 +36,7 @@ libraries, and all assets, then restarts the UI.
   evdev.py       input-device constants and IO (shared with the daemons)
   apps.py        app launching, volume/brightness helpers
   registry.py    loads the TOML app registry (below)
+  state.py       persistent device state (/var/lib/bit0/state.json)
   ui/
     core.py      Widget / Page / Router (focus ring, page stack)
     widgets.py   Button, Slider, Tile, AppGrid, layout helpers
@@ -150,11 +151,32 @@ mascots/
                     from code via mascot.say([...], emotion="happy")
 ```
 
-Adding a directory adds the mascot to the pool. On a device that has
-never chosen (no `/var/lib/bit0/mascot` file), the launcher shows the
-**CHOOSE YOUR MASCOT** screen at boot; the choice persists across
-reboots. To retrigger the chooser during development:
-`adb shell rm /var/lib/bit0/mascot` and restart the launcher.
+Adding a directory adds the mascot to the pool.
+
+### Device state and onboarding
+
+Runtime configuration lives in `/var/lib/bit0/state.json` (never part
+of the image — a fresh flash has no file, which *is* the first-boot
+signal):
+
+```json
+{
+  "user_name": "PEPE",     // used by the {USER} placeholder, may be ""
+  "mascot": "pixel",       // chosen mascot id (directory name)
+  "onboarded": true        // false/missing -> onboarding runs at boot
+}
+```
+
+While `onboarded` is false the launcher boots into the **CHOOSE YOUR
+MASCOT** screen; picking one saves the state and plays the onboarding
+script from `theme.json` (`mascot.onboarding`) as *modal* messages.
+Message lists support `{USER}` and `{MASCOT}` placeholders; an empty
+user name drops the token cleanly ("HI {USER}." becomes "HI.").
+
+To re-run onboarding during development:
+`adb shell rm /var/lib/bit0/state.json` and restart the launcher.
+There is no name-entry screen yet — set `user_name` by editing the
+JSON (uppercase, font charset).
 
 The speech bubble draws itself and wraps text — there is no bubble
 asset. The mascot's greeting and its resting phrases ("IM HERE." etc.)

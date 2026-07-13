@@ -7,3 +7,7 @@ label = "PICO-8"
 exec = ["/usr/local/bin/pico8-launch"]
 requires = "/root/pico-8/pico8_dyn"
 kill_stale = ["pico8_dyn"]
+# color icon: source PNG in the icons dir, converted to pico-8-logo.565
+# at build time (scripts/png-to-565.py). A .png/.565 icon renders the
+# tile with the image on top and the label below in the small font.
+icon = "pico-8-logo.png"

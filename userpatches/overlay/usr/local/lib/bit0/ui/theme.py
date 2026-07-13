@@ -50,10 +50,20 @@ class Theme:
     splash_bar_color: int = 0xFD20
     splash_bg_color: int = 0x0000
     splash_logo: str = ''     # icon filename drawn above/instead of the text
-    # mascot ([mascot] section, 6.5); greeting shows once per boot
+    # mascot ([mascot] section, 6.5). {USER}/{MASCOT} placeholders are
+    # substituted from the device state (bit0.state) and mascot name.
+    # onboarding: modal script after the first-boot chooser (6.5.2);
+    # greeting: casual messages once per regular boot.
     mascot_enabled: bool = True
+    mascot_onboarding: list = field(default_factory=lambda: [
+        'HI {USER}. I AM {MASCOT}.',
+        'WELCOME TO YOUR BIT-0.',
+        'USE THE ARROWS OR THE TOUCH SCREEN TO MOVE AROUND.',
+        'PRESS ENTER OR TAP A TILE TO LAUNCH AN APP.',
+        'THE GEAR ON THE TOP RIGHT OPENS THE SETTINGS.',
+        'PRESS SPACE OR CLICK TO CONTINUE. ESC SKIPS ME.'])
     mascot_greeting: list = field(default_factory=lambda: [
-        'HELLO AGAIN.', 'PICK AN APP TO START.'])
+        'HELLO AGAIN {USER}.', 'PICK AN APP TO START.'])
     # resting phrases: the bubble never empties, it rotates through these
     # when the message queue runs out (empty list = bubble hides instead)
     mascot_idle: list = field(default_factory=lambda: [
@@ -107,6 +117,7 @@ _SCHEMA = {
     'features': {'page_dots': ('page_dots', _bool),
                  'typewriter': ('typewriter', _bool)},
     'mascot': {'enabled': ('mascot_enabled', _bool),
+               'onboarding': ('mascot_onboarding', _strlist),
                'greeting': ('mascot_greeting', _strlist),
                'idle': ('mascot_idle', _strlist)},
     'splash': {
