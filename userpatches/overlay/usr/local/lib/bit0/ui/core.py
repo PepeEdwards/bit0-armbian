@@ -163,34 +163,45 @@ class Router:
     """Page stack; `page` is the top. push/pop reset focus and mark the
     new page for a full recompose.
 
-    `overlay` (the mascot) gets input precedence while its bubble is
-    visible: ENTER/SPACE and clicks anywhere advance the message queue,
-    ESC dismisses it, arrows fall through to the focus ring. The rule
-    lives here so widgets never need to know about the bubble (6.5)."""
+    `overlay` (the mascot) gets input precedence per message class
+    (audit 6.5.1): a modal (onboarding) head locks the UI - ALL keys are
+    captured (ENTER/SPACE advance, ESC skips the queue, everything else
+    is swallowed) and clicks anywhere advance. A casual head never
+    captures keys and only a click ON the bubble dismisses it; the rest
+    of the page stays live. The rules live here so widgets never need
+    to know about the bubble."""
 
     def __init__(self, pages, root, overlay=None):
         self.pages = pages
         self.stack = [root]
         self.overlay = overlay
 
+    def _overlay_active(self):
+        o = self.overlay
+        return o if (o and o.bubble_visible and o in self.page.widgets) \
+            else None
+
     def intercept_key(self, code):
         """True if the overlay consumed the key (caller: full redraw)."""
-        o = self.overlay
-        if not (o and o.bubble_visible):
-            return False
+        o = self._overlay_active()
+        if not (o and o.locking):
+            return False  # casual messages never capture keys
         if code in (KEY_ENTER, KEY_KPENTER, KEY_SPACE):
             o.advance()
-            return True
-        if code == KEY_ESC:
+        elif code == KEY_ESC:
             o.dismiss()
-            return True
-        return False
+        return True  # modal: the UI is locked, swallow everything else
 
-    def intercept_click(self):
-        """True if the overlay consumed a click (advances the bubble)."""
-        o = self.overlay
-        if o and o.bubble_visible:
-            o.advance()
+    def intercept_click(self, px, py):
+        """True if the overlay consumed a click at (px, py)."""
+        o = self._overlay_active()
+        if not o:
+            return False
+        if o.locking:
+            o.advance()  # modal: click anywhere advances
+            return True
+        if o.hit_bubble(px, py):
+            o.advance()  # casual: only the bubble itself is a target
             return True
         return False
 

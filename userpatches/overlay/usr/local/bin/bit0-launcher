@@ -321,11 +321,18 @@ def main():
             state['bri'] = set_brightness(state['bri_pending'])
             state['bri_pending'] = None
         dirty = pg.dirty_widgets()
-        if not full and router.overlay and router.overlay.bubble_visible \
-                and any(w is not router.overlay for w in dirty):
-            # a widget under the floating bubble changed: recompose the
-            # whole scene so draw order stays bubble-on-top
-            full = True
+        ov = router.overlay
+        if not full and ov and ov in pg.widgets and dirty:
+            if ov.locking:
+                # modal message showing: EVERY redraw becomes a full
+                # compose so the dim cover is rebuilt exactly once and
+                # never double-darkens (audit 6.5.1)
+                full = True
+            elif ov.bubble_visible \
+                    and any(w is not ov for w in dirty):
+                # a widget under the floating bubble changed: recompose
+                # the whole scene so draw order stays bubble-on-top
+                full = True
         if full:
             pg.compose(scr)
             scr.flush()  # full-frame flush covers the old cursor patch too
@@ -472,16 +479,21 @@ def main():
                 if val == 2 and code in NO_REPEAT:
                     continue  # no activation on autorepeat
                 if router.intercept_key(code):
-                    full = True  # bubble advanced/dismissed: repaint scene
+                    # only modal messages capture keys; the cover state
+                    # changed either way, so repaint the whole scene
+                    full = True
                     continue
                 a = page_key(pg, code)
                 if a and act is None:
                     act = a  # one action per tick; later keys still navigate
 
-        if clicked and router.intercept_click():
-            clicked = False  # bubble advanced: click goes no further
-            held = False
-            full = True
+        if clicked:
+            was_locking = mascot.locking if mascot else False
+            if router.intercept_click(cx, cy):
+                clicked = False  # bubble advanced: click goes no further
+                held = False
+                if was_locking:
+                    full = True  # the dim cover just lifted or re-drew
 
         if moved or clicked:
             if not cursor_on:  # pointer motion brings the cursor back
@@ -534,8 +546,9 @@ def main():
                 mascot.set_definition(d)
                 pg = router.pop()
                 full = True
+                # onboarding: modal - locks the UI under the dim cover
                 mascot.say(['HI. I AM %s.' % d['name']]
-                           + list(th.mascot_greeting))
+                           + list(th.mascot_greeting), modal=True)
             elif 'launch' in act:
                 entry = act['launch']
                 print(f'bit0-launcher: launching {entry["label"]}', flush=True)

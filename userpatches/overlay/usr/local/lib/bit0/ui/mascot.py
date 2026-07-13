@@ -176,12 +176,17 @@ class Mascot(Widget):
     focusable = False
     BLINK_EVERY, BLINK_LEN, TALK_STEP = 4.0, 0.15, 0.35
 
+    # casual-message lifetime: base + per-character, clamped (audit 6.5.1)
+    EXPIRE_BASE, EXPIRE_PER_CHAR = 1.5, 0.06
+    EXPIRE_MIN, EXPIRE_MAX = 2.5, 7.0
+
     def __init__(self, definition, **rect):
         super().__init__(**rect)
-        self.queue = []
+        self.queue = []         # (text, modal) pairs; the head is shown
         self._cur = 'idle'      # sprite key currently shown
         self._emotion = None    # say()-requested sprite while speaking
         self._deadline = None   # next animation step, None = static
+        self._expire = None     # casual head auto-dismiss time
         self._idle_i = -1       # rotates through theme.mascot_idle
         self.set_definition(definition)
 
@@ -196,38 +201,66 @@ class Mascot(Widget):
     # ── message queue ────────────────────────────────────────────────────
     @property
     def bubble_visible(self):
-        """True only for QUEUED messages - this gates the Router's input
-        capture. The resting phrase draws a bubble too but must never
-        swallow clicks, or the menu becomes unusable."""
+        """True only for QUEUED messages. The resting phrase draws a
+        bubble too but must never affect input."""
         return bool(self.queue)
+
+    @property
+    def locking(self):
+        """True while the head message is modal (onboarding): the Router
+        captures ALL input and the page gets the darkened cover."""
+        return bool(self.queue) and self.queue[0][1]
 
     def current_text(self):
         """Queued message head, else the resting phrase (the mascot is
         never without a bubble), else None when the theme's idle list
         is emptied to opt out."""
         if self.queue:
-            return self.queue[0]
+            return self.queue[0][0]
         idle = theme().mascot_idle
         return idle[self._idle_i % len(idle)] if idle else None
 
-    def say(self, msgs, emotion=None):
-        """Queue messages; `emotion` picks that sprite while speaking
-        (falls back to idle when the mascot doesn't have it)."""
-        self.queue.extend(msgs)
+    def say(self, msgs, emotion=None, modal=False):
+        """Queue messages. modal=True (onboarding) locks the UI until
+        advanced; the default is casual: no input capture, auto-dismiss
+        on a length-scaled timer or a click on the bubble (audit 6.5.1).
+        `emotion` picks that sprite while speaking (falls back to idle
+        when the mascot doesn't have it)."""
+        head_new = not self.queue
+        self.queue.extend((m, modal) for m in msgs)
         self._emotion = emotion if emotion in self.sprites else None
         self._cur = self._emotion or 'idle'
         if 'talk' in self.sprites and not self._emotion:
             self._cur = 'talk'
             self._deadline = time.monotonic() + self.TALK_STEP
+        if head_new:
+            self._arm_head()
         self.dirty = True
 
     def advance(self):
-        """Next message; the last one dismisses the dialogue."""
+        """Next message; the last one settles into a resting phrase."""
         if self.queue:
             self.queue.pop(0)
-        if not self.queue:
+        if self.queue:
+            self._arm_head()
+        else:
             self._settle()
         self.dirty = True
+
+    def _arm_head(self):
+        """Start the auto-dismiss timer when the new head is casual."""
+        if self.queue and not self.queue[0][1]:
+            life = min(self.EXPIRE_MAX,
+                       max(self.EXPIRE_MIN, self.EXPIRE_BASE
+                           + self.EXPIRE_PER_CHAR * len(self.queue[0][0])))
+            self._expire = time.monotonic() + life
+        else:
+            self._expire = None
+
+    def hit_bubble(self, px, py):
+        """Pointer over the bubble (casual click-to-dismiss target)."""
+        dx, dy, dw, dh = self._dialogue_rect()
+        return dx <= px < dx + dw and dy <= py < dy + dh
 
     def dismiss(self):
         self.queue.clear()
@@ -237,15 +270,20 @@ class Mascot(Widget):
     def _settle(self):
         self._emotion = None
         self._cur = 'idle'
+        self._expire = None
         self._idle_i += 1  # next resting phrase each time we go quiet
         self._deadline = (time.monotonic() + self.BLINK_EVERY
                           if 'blink' in self.sprites else None)
 
-    # ── animation (only when the mascot has talk/blink sprites) ─────────
+    # ── animation + casual-message expiry deadlines ──────────────────────
     def next_deadline(self):
-        return self._deadline
+        cands = [d for d in (self._deadline, self._expire) if d is not None]
+        return min(cands) if cands else None
 
     def tick(self, now):
+        if self._expire is not None and now >= self._expire:
+            self.advance()  # casual head timed out
+            return True
         if self._deadline is None or now < self._deadline:
             return False
         if self.bubble_visible and 'talk' in self.sprites \
@@ -289,6 +327,11 @@ class Mascot(Widget):
 
     def draw(self, scr, focused):
         th = theme()
+        if self.locking:
+            # modal cover: darken the locked page above the band. Runs
+            # only during a full compose (the launcher escalates every
+            # redraw to full while locking), so it never double-darkens.
+            scr.dim(0, max(0, self.y - 4))
         self._draw_sprite(scr, th)
         text = self.current_text()
         if text is None:

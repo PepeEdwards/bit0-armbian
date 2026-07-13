@@ -19,7 +19,7 @@ Everything custom lives in `userpatches/` (the official Armbian out-of-tree cust
 | `userpatches/overlay/` | rootfs files: input daemons, bit0 UI, systemd units |
 | `userpatches/customize-image.sh` | image chroot hook: apt packages, service enablement |
 | `scripts/build.sh` | build wrapper (run on a supported host, see below) |
-| `docs/` | porting notes, pico-8 install guide |
+| `docs/` | porting notes, pico-8 install guide, launcher UI guide (`UI.md`: adding apps, icons/sprites, mascots) |
 
 ## Building
 

@@ -100,6 +100,18 @@ class Screen:
     def text_width(self, s, scale):
         return len(s) * round(GLYPH_W * scale)
 
+    def dim(self, y0, y1):
+        """Darken scene rows [y0, y1) to ~50%: RGB565 halving via
+        (v >> 1) & 0x7BEF on every pixel. Done as one big-int shift +
+        mask over the contiguous region (little-endian keeps the u16s
+        adjacent; the mask's cleared top bit drops the neighbor's
+        carried-in LSB), so it runs at C speed on the Cortex-A7."""
+        a, b = y0 * self.w * 2, y1 * self.w * 2
+        buf = self.scene[a:b]
+        mask = int.from_bytes(b'\xef\x7b' * (len(buf) // 2), 'little')
+        n = (int.from_bytes(buf, 'little') >> 1) & mask
+        self.scene[a:b] = n.to_bytes(len(buf), 'little')
+
     def flush(self, x=0, y=0, w=None, h=None):
         w = self.w if w is None else w
         h = self.h if h is None else h
