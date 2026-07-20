@@ -83,6 +83,29 @@ status lines alongside it.
   `Environment=` lines, read with `os.environ.get(..., default)` — behavior
   tunables stay as code constants.
 
+## On-device access (adb)
+
+The image ships an **unauthenticated root adbd** over the USB-OTG gadget
+(`bit0-usb-gadget.service`), so a data USB cable *is* the console — no serial
+adapter needed (the board's UART is the QMK keyboard link, not a console).
+
+- **Client selection.** From WSL use the Windows `adb.exe` (interop); on native
+  Linux use `adb`. Let scripts pick automatically, as `push-launcher.sh` does:
+  `ADB=adb; command -v adb >/dev/null 2>&1 || ADB=adb.exe`.
+- `adb devices` — confirm the board enumerates (one `<serial>	device` line)
+  before doing anything; adbd is unauthenticated, so there's no pairing step.
+- `adb shell` — root console on the target; `adb shell <cmd>` for one-offs.
+- **Deploy overlay files to their real paths.** Run from the repo root so the
+  relative overlay path maps 1:1 onto the target path, e.g.
+  `adb push userpatches/overlay/etc/foo /etc/foo` — what you test is exactly what
+  the next image build ships. `scripts/push-launcher.sh` is the worked example;
+  create the parent dir first (`adb shell mkdir -p …`) for a brand-new path.
+- **`adb shell sync` after every push, before any restart or power-cycle.** The
+  device gets yanked uncleanly; unsynced writes read back as 0xFF flash garbage.
+- **Logs are volatile** (`Storage=volatile`, journal in `/run`): follow live with
+  `adb shell journalctl -u <unit> -f`, but they reset on reboot — capture what
+  you need before power-cycling.
+
 ## Verification before "done"
 
 - Python: syntax-check every edited script (`python3 -m py_compile` or

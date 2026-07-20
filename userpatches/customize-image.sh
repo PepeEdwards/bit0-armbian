@@ -101,6 +101,51 @@ Main() {
 		echo "bit0: WARNING: /boot/armbianEnv.txt not present at customize time" >&2
 	fi
 
+	# Self-healing rootfs on boot. The handheld loses power uncleanly (dead
+	# battery / power-button hardware glitch), leaving ext4 dirty; repeated
+	# cuts corrupt the card. Two halves make it recover on its own:
+	#   - runtime: Armbian's generated root fstab carries errors=remount-ro,
+	#     so on detected corruption the kernel flags the fs and goes read-only
+	#     instead of writing more damage (we assert this below, loudly).
+	#   - next boot: fsck.repair=yes makes systemd-fsck repair a dirty/flagged
+	#     fs non-interactively. WITHOUT it the default 'preen' mode drops any
+	#     non-trivial damage to an emergency shell — a brick on a device whose
+	#     only console is the LCD launcher.
+	# (Low-battery auto-shutdown, the real cure for the power yank, is deferred:
+	#  the fuel gauge is behind the power-controller I2C the QMK keyboard/UART
+	#  currently owns, so Linux can't read it yet.)
+	echo "bit0: enabling self-healing boot fsck" >&2
+	if [ -f /boot/armbianEnv.txt ]; then
+		if grep -q '^extraargs=' /boot/armbianEnv.txt; then
+			grep -q 'fsck\.repair=' /boot/armbianEnv.txt ||
+				sed -i '/^extraargs=/ s/$/ fsck.repair=yes/' /boot/armbianEnv.txt
+		else
+			echo 'extraargs=fsck.repair=yes' >> /boot/armbianEnv.txt
+		fi
+	else
+		echo "bit0: WARNING: /boot/armbianEnv.txt absent; boot fsck not set" >&2
+	fi
+	# Assert the runtime half is present; warn (not fatal — still bootable) if a
+	# future Armbian default drops it, since the self-heal loop needs it.
+	if [ -f /etc/fstab ] &&
+	   grep -qE '^[^#].*[[:space:]]/[[:space:]].*errors=remount-ro' /etc/fstab; then
+		grep -E '[[:space:]]/[[:space:]]' /etc/fstab >&2
+	else
+		echo "bit0: WARNING: root fstab lacks errors=remount-ro; self-heal weakened" >&2
+	fi
+
+	# Keep the systemd journal in RAM (Storage=volatile, set by the journald
+	# drop-in in the overlay): it was the single busiest SD writer and one of
+	# its files (system.journal) was exactly what a power cut corrupted on a
+	# yanked card. Drop any persistent journal the base image created so nothing
+	# stale ships on the flash — journald recreates the runtime one in /run.
+	echo "bit0: making systemd journal volatile" >&2
+	[ -f /etc/systemd/journald.conf.d/bit0.conf ] || {
+		echo "bit0: FATAL: journald volatile drop-in missing from overlay" >&2
+		exit 1
+	}
+	rm -rf /var/log/journal
+
 	echo "bit0: customization done" >&2
 }
 
